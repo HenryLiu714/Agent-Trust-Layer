@@ -15,8 +15,9 @@ from tests.support.engine import engine_config, open_tunnel, raw_tunnel, start_e
 def test_a_tunnelled_request_whose_method_mitmproxy_would_not_call_http_is_still_seen(
     engine, upstream
 ):
-    """mitmproxy's raw TCP mode relays a plain tunnel past every hook when its first line does not
-    start with three letters. Off, `M-SEARCH` is parsed as the HTTP it is, and faked."""
+    """A tunnelled `M-SEARCH` is parsed as HTTP and faked, not relayed as raw TCP.
+
+    mitmproxy's raw TCP mode would relay a first line that does not start with three letters."""
     eng, seen = engine
     s = raw_tunnel(eng.listen_port(), upstream)
     with s:
@@ -27,8 +28,9 @@ def test_a_tunnelled_request_whose_method_mitmproxy_would_not_call_http_is_still
 
 
 def test_bytes_in_a_tunnel_that_are_not_http_are_never_relayed(engine):
-    """Shadow mode cannot read them, so it cannot know they are not a write: the tunnel fails
-    closed, and the destination is never even dialled."""
+    """Unreadable tunnel bytes fail closed, and the destination is never dialled.
+
+    irimi cannot read them, so it cannot know they are not a write."""
     eng, seen = engine
     with socket.create_server(("127.0.0.1", 0)) as destination:
         s = raw_tunnel(eng.listen_port(), destination.getsockname()[1])
@@ -46,9 +48,9 @@ def test_bytes_in_a_tunnel_that_are_not_http_are_never_relayed(engine):
 
 
 def test_a_tunnelled_request_whose_first_segment_is_short_is_still_seen(engine):
-    """mitmproxy decides a tunnel's protocol on its first bytes, and with raw TCP on it relays
-    one whose first segment holds fewer than three, an ordinary `POST` among them, past every hook.
-    Off, the request is read once it is whole, and faked; the destination is never dialled."""
+    """A `POST` split after two bytes is read whole and faked; the destination is never dialled.
+
+    mitmproxy picks a tunnel's protocol from its first bytes, and raw TCP mode would relay this."""
     eng, seen = engine
     with socket.create_server(("127.0.0.1", 0)) as destination:
         s = raw_tunnel(eng.listen_port(), destination.getsockname()[1])
@@ -64,9 +66,9 @@ def test_a_tunnelled_request_whose_first_segment_is_short_is_still_seen(engine):
 
 
 def test_a_connection_a_live_read_upgraded_is_closed_not_relayed(engine):
-    """A read is forwarded live, and the real service may answer `101` to an upgrade that is not
-    a WebSocket. With raw TCP on, mitmproxy then relays the connection as bytes, past every hook,
-    so a write sent on it reaches the service. Off, irimi closes it after the `101`."""
+    """irimi closes a connection a live read upgraded to a non-WebSocket protocol after the `101`.
+
+    Relayed as raw bytes, a write sent on it would reach the real service."""
     eng, seen = engine
     heard: list[bytes] = []
     with socket.create_server(("127.0.0.1", 0)) as service:
@@ -102,8 +104,9 @@ def test_a_connection_a_live_read_upgraded_is_closed_not_relayed(engine):
 def test_a_client_that_refuses_irimi_s_ca_is_reported_by_the_host_it_asked_for(
     tmp_path, monkeypatch
 ):
-    """A client that does not trust irimi's CA never sends a request, so no exchange exists; the
-    engine reports the refused handshake by its SNI instead, and nothing raises."""
+    """The engine reports a handshake refused by a client that distrusts its CA, by SNI.
+
+    No request is ever sent, so no exchange exists, and nothing raises."""
     cfg = engine_config(tmp_path, monkeypatch)
     refused = []
     reported = threading.Event()

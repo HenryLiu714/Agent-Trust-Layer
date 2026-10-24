@@ -7,8 +7,9 @@ from tests.support.upstreams import SLOW_S
 
 
 def test_a_live_read_a_faked_write_and_a_lost_upstream_are_each_timed(engine, upstream):
-    """Each exchange starts when the request hook parses it and ends in the hook that finishes
-    it: `response` for the first two, `error` for the third."""
+    """Each exchange is timed from the request hook to the hook that finishes it.
+
+    That is `response` for the first two and `error` for the third."""
     eng, seen = engine
     before = time.time()
     via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
@@ -26,9 +27,9 @@ def test_a_live_read_a_faked_write_and_a_lost_upstream_are_each_timed(engine, up
 def test_the_precondition_read_is_timed_by_its_own_reader_call_inside_the_write(
     precondition_stub,
 ):
-    """An engine-issued read spans its `Reader` call, not the write's hook: it starts after
-    the write it checks, ends before it, and lasts as long as `ch_SLOW1`'s stub takes. It is also
-    recorded first - `seq` will be completion order - while the write started first."""
+    """irimi's check read is timed by its `Reader` call, inside the write it checks.
+
+    It lasts as long as `ch_SLOW1`'s stub takes, and is recorded first, in completion order."""
     proxy, stub, seen = precondition_stub
     status, _, _ = post_refund(proxy, stub, "ch_SLOW1")
     assert status == 200

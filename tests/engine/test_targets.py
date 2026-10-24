@@ -1,4 +1,4 @@
-"""Answer targets through the engine: a user's URL answers in place of the service."""
+"""Targets through the engine: a user's URL answers in place of the service."""
 
 import asyncio
 import http.client
@@ -42,15 +42,10 @@ def _host_header(headers: dict) -> str:
 
 
 def test_an_https_write_is_answered_when_the_real_host_is_not_listening(tmp_path, monkeypatch):
-    """mitmproxy's default `connection_strategy` is `eager`: it dials the real host - sending a
-    ClientHello carrying real SNI - before it has seen the request it would have answered. An
-    HTTPS route could then not be answered at all when the real service was unreachable, which is
-    exactly the case shadow mode and delegation are for: an offline, decommissioned or
-    not-yet-built API. `lazy` connects only when there is something to send.
+    """An HTTPS write is faked without dialling the real host, which may be unreachable.
 
-    The dead port stands in for the unreachable service; nothing is ever listening on it, so a
-    pass here means no connection to it was attempted.
-    """
+    irimi sets mitmproxy's `connection_strategy` to `lazy`; `eager` would dial before the request
+    arrives. Nothing listens on the dead port, so a pass means no connection was attempted."""
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
     dead = closed.getsockname()[1]
@@ -70,8 +65,7 @@ def test_an_https_write_is_answered_when_the_real_host_is_not_listening(tmp_path
 
 
 def test_a_targeted_write_is_answered_by_the_target_not_by_the_fake(tmp_path, monkeypatch, target):
-    """What a target is for: the write lands on an address the developer controls, that stub's
-    body is what the agent parses, and the fake never runs."""
+    """A targeted write lands on the developer's address and the agent gets its body; no fake."""
     maps = targeted_index(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
@@ -84,9 +78,7 @@ def test_a_targeted_write_is_answered_by_the_target_not_by_the_fake(tmp_path, mo
         stop()
     assert status == 200
     assert json.loads(data) == {"from": "target", "path": "/w"}
-    # Method, path and body pass through unchanged. Sliced to three elements rather than
-    # comparing the headers against themselves, and built as a list comprehension so an empty
-    # `seen` - the regression this test exists to catch - fails readably instead of IndexError.
+    # Method, path and body pass through unchanged; an empty `seen` fails readably here.
     assert [row[:3] for row in target.seen] == [("POST", "/w", b'{"a": 1}')]
     (ex,) = seen
     assert ex.answered_by == "delegated"
@@ -100,15 +92,10 @@ def test_a_targeted_write_is_answered_by_the_target_not_by_the_fake(tmp_path, mo
 def test_a_delegated_body_reaches_the_agent_as_the_target_sent_it(
     tmp_path, monkeypatch, target, path, body
 ):
-    """Stamping the answer's header does not rebuild the response. `http.Response.make` assigns
-    `.content`, which mitmproxy re-encodes per the surviving `content-encoding` - so a rebuilt
-    response compresses an already-compressed body again, and turns a body that was never valid
-    gzip into a valid gzip stream of itself. Either way the agent would get different bytes than
-    the target sent, in a tool whose thesis is that it sees what the service would have sent.
+    """A target's body reaches the agent byte for byte; stamping does not rebuild the response.
 
-    `respond` returns a new Response for every non-live answer, so this covers every delegated
-    exchange; the live path is safe because `respond` hands back the object it was given there.
-    """
+    A rebuilt response would be re-encoded per its `content-encoding`, compressing gzip twice or
+    turning invalid gzip into valid gzip of itself."""
     maps = targeted_index(
         tmp_path,
         monkeypatch,
@@ -129,14 +116,13 @@ def test_a_delegated_body_reaches_the_agent_as_the_target_sent_it(
         stop()
     assert received == body  # byte for byte, not merely "decodes to the same thing"
     assert encoding == "gzip"
-    assert stamp == "delegated"  # the header the rebuild existed to add is still there
+    assert stamp == "delegated"  # the answered-by header is still added
     (ex,) = seen
     assert ex.answered_by == "delegated"
 
 
 def test_a_delegated_exchange_records_what_the_agent_asked_for(tmp_path, monkeypatch, target):
-    """The Exchange keeps the agent's own request; where the answer came from is `target`. The
-    summary has to be able to say `create a thing -> 127.0.0.1:NNNN/w`, which needs both."""
+    """A targeted exchange keeps the agent's own request, and the target in `target`."""
     maps = targeted_index(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
@@ -163,12 +149,9 @@ CREDENTIAL_HEADERS_SENT = {
 def test_every_credential_header_is_stripped_before_it_reaches_a_target(
     tmp_path, monkeypatch, target
 ):
-    """A local stub does not need the real key, and forwarding it makes the target an
-    exfiltration path for a credential the agent never meant it to have.
+    """Every credential header, `Cookie` and `x-api-key` included, is stripped before a target.
 
-    Every credential header, not only `Authorization`: the rule is about keys, and `Cookie`,
-    `x-api-key` and `DD-API-KEY` are keys.
-    """
+    Forwarded, the target would hold a key the agent never meant it to have."""
     maps = targeted_index(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
@@ -190,9 +173,7 @@ def test_every_credential_header_is_stripped_before_it_reaches_a_target(
 
 
 def test_forward_auth_keeps_the_credential_headers(tmp_path, monkeypatch, target):
-    """The route opting in: a sandbox tenant or an internal simulator does need the key. It is
-    one switch for all of them - a route that wants its `Authorization` forwarded is a route
-    whose target is trusted with credentials."""
+    """A route with `forward_auth` passes every credential header to its trusted target."""
     from dataclasses import replace as _replace
 
     maps = targeted_index(
@@ -222,8 +203,7 @@ def test_forward_auth_keeps_the_credential_headers(tmp_path, monkeypatch, target
 def test_target_reads_sends_a_read_to_the_target_instead_of_the_real_service(
     tmp_path, monkeypatch, target, upstream
 ):
-    """A delegated service: its target, not production, is the world the agent sees. The read
-    must not reach the upstream, which would answer `hello from upstream`."""
+    """With `target_reads`, a read goes to the target and never reaches the real service."""
     maps = targeted_index(
         tmp_path,
         monkeypatch,
@@ -243,8 +223,7 @@ def test_target_reads_sends_a_read_to_the_target_instead_of_the_real_service(
 
 
 def test_a_service_target_also_covers_a_route_its_map_does_not_list(tmp_path, monkeypatch, target):
-    """Answering the unlisted routes with our own fake would give the agent a world that is half
-    the stub's and half ours, which is what `service_map` on the Classification is for."""
+    """A service-wide target answers unlisted routes too, so no answer is half fake, half target."""
     maps = targeted_index(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "", f"http://127.0.0.1:{target}")]
     )
@@ -262,14 +241,10 @@ def test_a_service_target_also_covers_a_route_its_map_does_not_list(tmp_path, mo
 def test_an_unreachable_target_is_a_502_with_the_json_body_the_issue_specifies(
     tmp_path, monkeypatch
 ):
-    """Never a silent fall back to the local fake: that would hide a broken setup and look
-    exactly like a working shadow run.
+    """An unreachable target is irimi's JSON 502 naming the target, never a fall back to the fake.
 
-    And the body is JSON naming irimi and the target, not mitmproxy's HTML error page. The flag
-    was right all along; the page was not. An SDK parses the body, and stripe-python, openai and
-    slack_sdk all raise on an HTML blob that names neither irimi nor the answer target, so "my
-    shadow run started failing" gave no hint that the developer's own stub was down.
-    """
+    A fall back would look like a working run; an HTML page would name neither irimi nor the
+    target to the SDK that parses it."""
     closed = socket.socket()
     closed.bind(("127.0.0.1", 0))
     dead = closed.getsockname()[1]
@@ -294,10 +269,9 @@ def test_an_unreachable_target_is_a_502_with_the_json_body_the_issue_specifies(
 
 
 def test_a_target_that_stops_listening_mid_run_is_still_flagged(tmp_path, monkeypatch, target):
-    """The probe is best-effort by construction - a stub can die between the probe and the dial -
-    so the properties that must not depend on it are pinned separately: no fall back to the fake,
-    `target-failed` on the exchange, and a 502 to the agent. Here the stub answers the first write
-    and is gone for the second."""
+    """A target that dies after the probe still gives a 502 and `target-failed`, never a fake.
+
+    The probe is best effort: a stub can die between the probe and the dial."""
     maps = targeted_index(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
@@ -315,8 +289,7 @@ def test_a_target_that_stops_listening_mid_run_is_still_flagged(tmp_path, monkey
 
 
 def test_a_faked_write_on_a_route_with_no_fixture_still_lists_its_webhooks(tmp_path, monkeypatch):
-    """`fires:` is about the write, not the answer's fidelity: DEMO_MAP's route names no
-    `fixture:`, so the fake is L0, and it was still accepted."""
+    """An echo-answered write still lists its `fires:` webhooks: they describe the write."""
     eng, seen, stop = start_engine(
         engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch))
     )
@@ -333,10 +306,9 @@ def test_a_faked_write_on_a_route_with_no_fixture_still_lists_its_webhooks(tmp_p
 def test_a_delegated_write_lists_no_webhooks_whether_or_not_its_target_answers(
     tmp_path, monkeypatch, target
 ):
-    """The target performed the write, or did something else with it, or was not there; irimi
-    built nothing and claims nothing about what the real service would have sent. The
-    route names `fires:`, so the empty lists are the policy withholding it, not a map without
-    one - the test above is the same route faked."""
+    """A write sent to a target lists no webhooks: irimi claims nothing about what it did.
+
+    The route names `fires:`, so the empty lists are the policy withholding them."""
     maps = targeted_index(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
@@ -354,8 +326,7 @@ def test_a_delegated_write_lists_no_webhooks_whether_or_not_its_target_answers(
 
 
 def test_a_remote_target_is_probed_too_and_an_unreachable_one_is_irimis_json_502(monkeypatch):
-    """Every target is probed, a remote one as much as a loopback one, on the decision's worker
-    thread, so one nothing answers at gets irimi's JSON 502 rather than mitmproxy's HTML page."""
+    """A remote target is probed like a loopback one; an unreachable one gets irimi's JSON 502."""
     dialled = []
 
     def refuse(address, timeout):
@@ -371,12 +342,9 @@ def test_a_remote_target_is_probed_too_and_an_unreachable_one_is_irimis_json_502
 
 
 def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, monkeypatch):
-    """Forwarding to ourselves would make irimi connect to its own listener in a loop.
+    """A target naming irimi's own listener gets a JSON 502, so irimi never loops to itself.
 
-    Driven through the addon rather than a live engine on purpose: the check compares the target
-    against the port the listener actually bound, and arranging for a real engine to bind the one
-    port a pre-built map already names is a race against TIME_WAIT, not a test.
-    """
+    Driven through the addon: binding a real engine to the port a map names races TIME_WAIT."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine.mitm import META_KEY, IrimiAddon
@@ -414,10 +382,9 @@ def test_a_target_naming_our_own_listener_is_refused_with_a_json_502(tmp_path, m
 
 
 def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monkeypatch):
-    """The `error` hook does not assert `upstream-error` on a write irimi answered itself: nothing
-    was ever sent upstream, and the fidelity flag the answer really carried must survive. Driven
-    through the addon because the case is a client disappearing between two hooks, which a live
-    engine cannot stage."""
+    """The `error` hook adds no `upstream-error` to a write irimi answered itself.
+
+    Driven through the addon: a client vanishing between two hooks cannot be staged live."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine.mitm import IrimiAddon
@@ -443,9 +410,7 @@ def test_a_locally_answered_flow_that_errors_keeps_its_own_flags(tmp_path, monke
 
 
 def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_path, monkeypatch):
-    """`request()` already answered and recorded this one; the client going away afterwards does
-    not record it twice or make the target fail a second time. Driven through the addon, like
-    every other client-disappears case."""
+    """A refused target is recorded once, even if the client vanishes after `request()`."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine.mitm import IrimiAddon
@@ -472,12 +437,11 @@ def test_a_refused_target_is_flagged_once_even_if_the_client_then_vanishes(tmp_p
 
     (ex,) = seen
     assert ex.answered_by == "irimi"
-    # The answer's fidelity flag goes with it: nothing answered the request faithfully.
     assert ex.flags == ("target-failed",)
 
 
 def test_an_untargeted_write_is_still_faked(tmp_path, monkeypatch, target):
-    """A route target must not leak onto the rest of the service."""
+    """A route's target does not apply to the service's other routes."""
     maps = targeted_index(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
@@ -489,16 +453,14 @@ def test_an_untargeted_write_is_still_faked(tmp_path, monkeypatch, target):
     finally:
         stop()
     assert status == 200
-    assert json.loads(data) == {}  # the L0 echo, not the target
+    assert json.loads(data) == {}  # the echo, not the target
     assert target.seen == []
     (ex,) = seen
     assert ex.answered_by == "fake-L0" and ex.target == ""
 
 
 def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, target):
-    """`answered_by != "live"` was an exhaustive spelling of "is a write" only while every read
-    was live. `target_reads` makes a delegated read the first non-live read, and the write log is
-    what the overlay replays onto later reads."""
+    """Neither a read nor a write sent to a target enters the write log the overlay applies."""
     maps = targeted_index(
         tmp_path,
         monkeypatch,
@@ -511,8 +473,7 @@ def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, 
         status, _ = via_proxy(eng.listen_port(), "GET", "http://127.0.0.1:1/hello")
         assert status == 200
         assert addon.session.write_log.for_run("t3st") == (), "a delegated read is in the write log"
-        # Nor is the delegated *write*: the target performed it, or did not, and the overlay
-        # cannot apply a write irimi did not author.
+        # The overlay cannot apply a write irimi did not author.
         via_proxy(eng.listen_port(), "POST", "http://127.0.0.1:1/things", body=b"{}")
         assert addon.session.write_log.for_run("t3st") == (), (
             "a delegated write is in the write log"
@@ -522,15 +483,9 @@ def test_neither_half_of_a_delegated_exchange_is_a_write(tmp_path, monkeypatch, 
 
 
 def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
-    """A target irimi refuses is answered `502` and recorded in `request()`, and it must not reach
-    the write log, the log the overlay applies to live reads.
+    """A write to a refused target is recorded with a 502 but never enters the write log.
 
-    Nothing was performed: not at the target, not at the real service, not by the fake. The
-    overlay would hand the agent back a write irimi refused to send anywhere.
-
-    It is asked with the port and the address the connection reached irimi at, which is irimi's
-    own listener too.
-    """
+    The refusal is asked with the port and address the connection reached irimi at."""
     asked = []
 
     def refuse(target, port, local_address=""):
@@ -549,7 +504,7 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
         stop()
     assert status == 502 and json.loads(data)["error"]["type"] == "irimi_target_failed"
     assert asked == [(f"http://127.0.0.1:{target}/w", eng.listen_port(), "127.0.0.1")]
-    # Still recorded - a write irimi could not answer is exactly what the trace has to show.
+    # Still recorded: the trace has to show a write irimi could not answer.
     assert [ex.flags for ex in seen] == [("target-failed",)]
     assert addon.session.write_log.for_run("t3st") == (), (
         "a write performed nowhere is in the write log"
@@ -557,9 +512,7 @@ def test_a_refused_target_is_not_a_write_either(tmp_path, monkeypatch, target):
 
 
 def test_an_ipv6_target_gets_a_bracketed_host_header(tmp_path, monkeypatch):
-    """`parts.hostname` strips an IPv6 literal's brackets, so the authority has to put them back:
-    RFC 3986 spells it `[::1]:3000`, and `::1:3000` is a different and unparseable thing. The
-    README lists `::1` as a supported target and the loader accepts it."""
+    """An IPv6 target gets a `[::1]:PORT` Host header (RFC 3986), not an unparseable `::1:PORT`."""
 
     class _V6Server(HTTPServer):
         address_family = socket.AF_INET6
@@ -590,8 +543,7 @@ def test_an_ipv6_target_gets_a_bracketed_host_header(tmp_path, monkeypatch):
 def test_the_host_header_is_set_to_the_target_not_left_as_the_service(
     tmp_path, monkeypatch, target
 ):
-    """Deleting `flow.request.host_header = authority` passed the whole suite. A stub that routes
-    on Host - any vhost, any framework's host check - would see the real service's name."""
+    """A target gets its own authority as Host, so a stub that routes on Host works."""
     maps = targeted_index(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{target}/w")]
     )
@@ -604,18 +556,10 @@ def test_the_host_header_is_set_to_the_target_not_left_as_the_service(
 
 
 def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monkeypatch):
-    """The streamed-flow rule at the seam rather than end to end.
+    """The `response` hook writes nothing back to a streamed flow, whose headers are already sent.
 
-    A streamed response's headers were sent before this hook ran, and its body is never assembled,
-    so anything `response()` writes back is either ignored or destructive: rebuilding the flow
-    replaces a live stream with a buffered, empty-bodied response. `responseheaders` is the hook
-    that owns a streamed answer - it is where the `Irimi-Answered-By` stamp goes for exactly this
-    reason - and it is deliberately not called here, so that a stamp appearing on the flow is
-    proof that `response()` wrote to it.
-
-    Driven through the addon because no client can observe the difference: a write that lands
-    after the headers are on the wire is invisible until the day it carries a body.
-    """
+    `responseheaders` owns a streamed answer and its stamp, and is not called here, so a stamp
+    on the flow proves `response()` wrote to it. No client could observe the difference."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine.mitm import META_KEY, IrimiAddon
@@ -653,9 +597,7 @@ def test_the_response_hook_writes_nothing_back_to_a_streamed_flow(tmp_path, monk
 def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothing_back(
     tmp_path, monkeypatch
 ):
-    """The seam test above, with the stream going through a real `StreamCapture` as
-    `responseheaders` sets one up: the flow is still left exactly as it was, and the exchange is
-    recorded from the tee's copy."""
+    """With a real `StreamCapture`, the flow is left as it was and recorded from the tee's copy."""
     from mitmproxy.test import tflow, tutils
 
     from irimi.engine.mitm import META_KEY, STREAM_KEY, IrimiAddon
@@ -698,8 +640,7 @@ def test_the_response_hook_records_a_streamed_flow_from_its_tee_and_writes_nothi
 
 
 def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
-    """The streaming guard names `delegated` as well as `live`, and only a delegated SSE route
-    tells the two apart: a guard of `("live",)` alone would buffer it."""
+    """A target's event stream reaches the agent chunk by chunk, as a live one does."""
     srv = serve(StreamUpstream)
     stream_port = srv
     try:
@@ -731,7 +672,7 @@ def test_a_streamed_target_response_is_not_buffered(tmp_path, monkeypatch):
             stop()
     finally:
         srv.stop()
-    # A delegated stream is recorded as a live one is: the target's chunks, joined.
+    # A target's stream is recorded as a live one is: its chunks, joined.
     (ex,) = seen
     assert (ex.answered_by, ex.target) == ("delegated", f"http://127.0.0.1:{stream_port}/v1/stream")
     assert ex.response is not None and ex.response.body == SSE_FIRST + SSE_SECOND

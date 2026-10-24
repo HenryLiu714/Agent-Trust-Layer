@@ -31,7 +31,7 @@ def test_a_get_is_forwarded_live(engine, upstream):
     assert ex.run_id == "t3st"
     assert ex.flags == ()
     assert ex.door == "forward"
-    assert ex.request.port == upstream  # a loopback upstream on another port is not the door
+    assert ex.request.port == upstream  # a loopback upstream on another port is not the listener
     assert ex.response.status == 200
 
 
@@ -42,7 +42,7 @@ def test_a_post_is_faked_with_an_echo(engine, upstream):
     )
     assert status == 200
     body = json.loads(data)
-    assert body["a"] == 1  # the L0 echo reflects the request's own fields
+    assert body["a"] == 1  # the echo reflects the request's own fields
     assert sorted(body) == ["a"]  # unmapped: nothing minted, and no other service's fields
     ex = seen[0]
     assert ex.answered_by == "fake-L0"
@@ -51,8 +51,7 @@ def test_a_post_is_faked_with_an_echo(engine, upstream):
 
 
 def test_mapped_write_is_named_and_faked(tmp_path, monkeypatch, upstream):
-    """The maps have to reach the classifier through EngineConfig, or every mapped route would be
-    classified by its verb alone."""
+    """A mapped write is classified by its route from the maps on EngineConfig, not by its verb."""
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch))
     eng, seen, stop = start_engine(cfg)
     try:
@@ -84,8 +83,7 @@ def test_mapped_read_is_named_and_forwarded(tmp_path, monkeypatch, upstream):
 
 
 def test_a_slack_read_raises_the_ts_watermark(tmp_path, monkeypatch, upstream):
-    """A minted `ts` has to sort after the real messages the run already read, and this hook
-    is the only place those values go past - the write log holds writes, not reads."""
+    """A Slack read raises the `ts` clock, so a minted `ts` sorts after messages already read."""
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, doc=SLACK_MAP))
     eng, seen, stop = start_engine(cfg)
     try:
@@ -145,10 +143,9 @@ def test_undecodable_upstream_body_is_still_recorded(engine, upstream):
 def test_an_upstream_body_in_an_encoding_that_is_not_a_decoding_is_still_recorded(
     engine, upstream, content_encoding
 ):
-    """mitmproxy raises TypeError, not ValueError, for a text codec it cannot run on bytes
-    (`rot13`), and `get_content(strict=False)` let it through: out of the `response` hook, that
-    dropped the exchange from the trace. A byte-to-text codec (`utf-8`) decodes to a str, which is
-    no body at all. Either way the body is recorded as it came, as an undecodable one is."""
+    """A body in a text codec (`rot13`, `utf-8`) is recorded as it came, like an undecodable one.
+
+    mitmproxy raises TypeError for `rot13`, and `utf-8` decodes to a str, which is no body."""
     eng, seen = engine
     url = f"http://127.0.0.1:{upstream}/encoded/{content_encoding}"
     status, data = via_proxy(eng.listen_port(), "GET", url)
@@ -183,9 +180,9 @@ def test_an_overlays_answer_reaches_the_client(tmp_path, monkeypatch, upstream):
 def test_an_overlaid_read_in_an_encoding_mitmproxy_cannot_apply_still_reaches_the_client(
     tmp_path, monkeypatch, upstream, content_encoding
 ):
-    """The overlay keeps the upstream's headers, and mitmproxy re-encodes a rebuilt body per its
-    `content-encoding`: for a text codec that raised TypeError out of the `response` hook, and the
-    exchange was never recorded. The body goes out as the overlay built it."""
+    """An overlaid body goes out as the overlay built it, whatever `content-encoding` it keeps.
+
+    mitmproxy would re-encode it per that header, and raises TypeError for a text codec."""
 
     class _Overlay:
         def __call__(
@@ -235,8 +232,7 @@ def test_repeated_headers_survive_a_local_answer(tmp_path, monkeypatch, upstream
 
 
 def test_port_in_use_raises_engine_start_error(tmp_path, monkeypatch):
-    """A taken port is said in irimi's words, naming its own `--port` and never mitmproxy's
-    `--mode`."""
+    """A taken port is reported in irimi's words, naming `--port` and never mitmproxy's `--mode`."""
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     sock.listen()
@@ -277,8 +273,7 @@ def test_shutdown_before_run_makes_run_return(tmp_path, monkeypatch):
 
 
 def test_the_engine_never_closes_the_store_even_when_setup_fails(tmp_path, monkeypatch):
-    """The store is the composition root's to open and to close; the CLI closes it on every way
-    out, a failed start included."""
+    """The engine never closes the store, which the composition root opens and closes."""
     closed = []
 
     class _Store:
@@ -297,7 +292,7 @@ def test_the_engine_never_closes_the_store_even_when_setup_fails(tmp_path, monke
 
 
 def test_faked_write_reflects_a_form_body_and_is_flagged(engine, upstream):
-    """The L0 echo reaches the client through the proxy, form-encoded as stripe-python posts."""
+    """The echo of a form-encoded write, as stripe-python posts it, reaches the client."""
     eng, seen = engine
     status, data = via_proxy(
         eng.listen_port(),

@@ -36,9 +36,9 @@ def test_a_refund_of_a_fully_refunded_charge_is_rejected_with_stripes_own_body(
 
 
 def test_a_rejected_refund_records_no_webhooks(precondition_stub):
-    """L3 said the real service would have refused this refund: nothing was performed, so
-    nothing would have fired. A refund L3 passed goes first, so the empty list is
-    this map's `fires:` withheld and not a map that never had one."""
+    """A refund the precondition check rejects would fire nothing; a passed one lists its events.
+
+    The passed refund goes first, so the empty list is the map's `fires:` withheld."""
     proxy, stub, seen = precondition_stub
     status, _, _ = post_refund(proxy, stub, "ch_REAL1")
     assert status == 200
@@ -54,9 +54,9 @@ def test_a_rejected_refund_records_no_webhooks(precondition_stub):
 def test_a_second_refund_in_one_run_is_rejected_because_the_overlay_applied_the_first(
     precondition_stub,
 ):
-    """The precondition check sees the run's own writes. The real charge is untouched and
-    refundable both times; what makes the second refund one Stripe would refuse is the first,
-    which only irimi's write log knows about."""
+    """The precondition check sees the run's own faked writes, so a second full refund fails.
+
+    The real charge stays refundable; only irimi's write log knows about the first refund."""
     proxy, stub, seen = precondition_stub
     first, _, data = post_refund(proxy, stub, "ch_REAL1", amount=4900)
     assert first == 200
@@ -69,8 +69,7 @@ def test_a_second_refund_in_one_run_is_rejected_because_the_overlay_applied_the_
 
 
 def test_a_rejected_write_never_enters_the_write_log(precondition_stub):
-    """Had the rejected refund been logged, the overlay would add it to the charge re-read below
-    and stamp the read `overlay`."""
+    """A rejected refund is not logged, so the overlay leaves a re-read of its charge live."""
     proxy, stub, seen = precondition_stub
     status, _, _ = post_refund(proxy, stub, "ch_FULL1")
     assert status == 400
@@ -105,9 +104,7 @@ def test_a_precondition_read_that_429s_leaves_the_write_faked_at_l2(precondition
 
 
 def test_a_refund_l3_could_not_check_still_lists_its_webhooks(precondition_stub):
-    """`not_evaluable` is not `rejected`: irimi could not find out, faked the write anyway, and
-    so accepted it - its events are listed like a passed refund's. Only a refusal lists nothing.
-    """
+    """A refund irimi could not check is faked as accepted, and lists its webhooks."""
     proxy, stub, seen = precondition_stub
     status, _, _ = post_refund(proxy, stub, "ch_BUSY1")
     assert status == 200
@@ -117,10 +114,9 @@ def test_a_refund_l3_could_not_check_still_lists_its_webhooks(precondition_stub)
 
 
 def test_a_precondition_read_that_redirects_is_not_followed_and_decides_nothing(precondition_stub):
-    """NO REDIRECT: the engine's read dials the object the classifier saw and no other.
-    Followed, `ch_MOVED1`'s 302 to the fully refunded `ch_FULL1` rejected this refund by another
-    charge's state. The 302 is the answer: `not_evaluable`, the write faked at L2 as a 429's is,
-    and `ch_FULL1` never asked."""
+    """irimi's check read never follows a redirect: a 302 leaves the check `not_evaluable`.
+
+    Following `ch_MOVED1`'s 302 to `ch_FULL1` would judge the refund by another charge's state."""
     proxy, stub, seen = precondition_stub
     status, headers, data = post_refund(proxy, stub, "ch_MOVED1")
     assert status == 200
@@ -136,9 +132,7 @@ def test_a_precondition_read_that_redirects_is_not_followed_and_decides_nothing(
 def test_a_concurrent_request_is_not_delayed_by_another_requests_precondition_read(
     precondition_stub,
 ):
-    """The request hook is `async def` and the decision runs on a worker thread, so a read that
-    arrives while a write's precondition read is still in the air is served straight away. With
-    the old synchronous hook B would have waited out the whole of A's probe."""
+    """A read is served while another write's check read is in flight, on a worker thread."""
     proxy, stub, _ = precondition_stub
     took: dict[str, float] = {}
     finished: list[str] = []
@@ -176,12 +170,9 @@ def test_the_stub_never_saw_a_post(precondition_stub):
 
 
 def _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch):
-    """A full refund of `ch_REAL1` and then the agent's own refunds list, through the proxy, and
-    the summary that run prints.
+    """Refund `ch_REAL1` in full, list refunds, and return the summary the run prints.
 
-    The index is built again by the `map_index` call `precondition_stub` made, so the write line
-    is the map's `human:` sentence and not the bare request. The fixture does not yield its index
-    because nine tests unpack it and only these two print a summary."""
+    The map index is rebuilt so the write line is the map's `human:` sentence."""
     status, _, _ = post_refund(proxy, stub, "ch_REAL1", amount=4900)
     assert status == 200
     status, headers, _ = read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds")
@@ -194,10 +185,9 @@ def _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch):
 def test_an_overlaid_read_is_listed_under_the_write_it_saw_through_the_proxy(
     precondition_stub, tmp_path, monkeypatch
 ):
-    """The `↳` line off a real run: the refunds list the overlay edited to show the refund
-    sits directly under that refund, and is the only `↳` line. The precondition read L3 issued
-    between them is counted as an irimi check read and never in `N reads`; it is live and
-    unedited, so it owes no line either way."""
+    """The overlaid refunds list is the only `↳` line, directly under the refund it shows.
+
+    irimi's check read is counted apart from the agent's reads and owes no `↳` line."""
     proxy, stub, seen = precondition_stub
     lines = _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch)
     # `$49.00` and not `4900`: the write names no currency, and irimi's own precondition read of
@@ -215,8 +205,7 @@ def test_an_overlaid_read_is_listed_under_the_write_it_saw_through_the_proxy(
 def test_the_closing_line_names_the_webhooks_a_real_refund_would_have_sent(
     precondition_stub, tmp_path, monkeypatch
 ):
-    """The closing clause off a real run: the events are the ones the engine put on the
-    accepted refund's `Exchange.would_fire`, named once each in the map's order."""
+    """The summary names the accepted refund's `would_fire` events once each, in the map's order."""
     proxy, stub, seen = precondition_stub
     lines = _refund_then_list_summary(proxy, stub, seen, tmp_path, monkeypatch)
     assert [ex.would_fire for ex in writes_in(seen)] == [("refund.created", "charge.refunded")]
@@ -224,8 +213,7 @@ def test_the_closing_line_names_the_webhooks_a_real_refund_would_have_sent(
 
 
 def test_a_faked_refund_carries_the_currency_its_precondition_read_found(precondition_stub):
-    """End to end through the real proxy: the charge the stub answers is in `usd`, the refund
-    posts no currency, and the exchange carries the code across so the summary can format it."""
+    """A faked refund that posts no currency carries the `usd` irimi's check read found."""
     proxy, stub, seen = precondition_stub
     status, _, _ = post_refund(proxy, stub, "ch_REAL1")
     assert status == 200
@@ -237,9 +225,7 @@ def test_a_faked_refund_carries_the_currency_its_precondition_read_found(precond
 def test_a_write_whose_precondition_read_never_answered_carries_no_currency(
     precondition_stub, tmp_path, monkeypatch
 ):
-    """`ch_BUSY1` 429s, so no document was read and there is nothing to denominate the amount
-    with. The write is still faked, and its line prints minor units of an unknown currency and
-    the status the check read came back with."""
+    """A write whose check read got 429 prints minor units of an unknown currency, and the 429."""
     proxy, stub, seen = precondition_stub
     status, _, _ = post_refund(proxy, stub, "ch_BUSY1")
     assert status == 200
@@ -255,8 +241,7 @@ def test_a_write_whose_precondition_read_never_answered_carries_no_currency(
 
 
 def _conversations_info(posted):
-    """Slack as the precondition check sees it: `C0OK` is a healthy channel the bot is in,
-    `C0ARCHIVED` is archived, and any other channel is not found."""
+    """Answer `conversations.info`: `C0OK` healthy, `C0ARCHIVED` archived, others not found."""
     channel = posted.get("channel")
     if channel not in ("C0OK", "C0ARCHIVED"):
         return {"ok": False, "error": "channel_not_found"}
@@ -273,7 +258,7 @@ def _conversations_info(posted):
 
 @pytest.fixture
 def slack_precondition_stub(tmp_path, monkeypatch):
-    """`precondition_stub`'s Slack twin. Yields (proxy port, stub port, exchanges)."""
+    """Yield (proxy port, stub port, exchanges) for precondition checks against a fake Slack."""
     from irimi.decide.overlay import ServiceOverlay
     from irimi.decide.reader import UpstreamReader
 
@@ -292,8 +277,7 @@ def slack_precondition_stub(tmp_path, monkeypatch):
 
 
 def test_a_post_to_an_archived_channel_is_rejected(slack_precondition_stub):
-    """Slack's own envelope, `ok: false` at 200, which is what makes slack_sdk raise
-    `SlackApiError` - asserted on the body, since the SDK is not a test dependency."""
+    """A post to an archived channel gets Slack's own `ok: false` at 200, which slack_sdk raises."""
     proxy, stub, seen = slack_precondition_stub
     status, headers, data = slack_call(
         proxy, stub, "chat.postMessage", {"channel": "C0ARCHIVED", "text": "hi"}

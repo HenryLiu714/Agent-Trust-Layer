@@ -29,13 +29,10 @@ def test_only_an_event_stream_content_type_is_streamed(content_type, expected):
 
 
 def test_a_server_sent_event_response_reaches_the_client_in_chunks(tmp_path, monkeypatch):
-    """The whole point of the `responseheaders` hook: without `flow.response.stream = True`
-    mitmproxy buffers the body, so the first chunk would not arrive until the upstream finished.
+    """A server-sent event stream reaches the client chunk by chunk, not buffered.
 
-    The upstream holds the second chunk until this test has read the first, and the client's
-    socket timeout is far shorter than the upstream's wait, so buffering fails the test rather
-    than slowing it down.
-    """
+    The upstream holds the second chunk until the first is read, and the client's timeout is far
+    shorter than its wait, so buffering fails the test rather than slowing it."""
     srv = serve(StreamUpstream)
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
     eng, seen, stop = start_engine(cfg)
@@ -78,9 +75,9 @@ def test_a_server_sent_event_response_reaches_the_client_in_chunks(tmp_path, mon
 def test_a_streamed_response_ends_when_its_stream_does_not_when_its_headers_leave(
     tmp_path, monkeypatch
 ):
-    """A streamed exchange is finished by the `response` hook, which mitmproxy runs once the
-    last chunk has gone - so its `ended_at` covers the whole stream the agent waited on, and not
-    only the headers `responseheaders` let through early."""
+    """A streamed exchange's `ended_at` covers the whole stream, not only its headers.
+
+    mitmproxy runs the `response` hook once the last chunk has gone."""
     srv = serve(StreamUpstream)
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
     eng, seen, stop = start_engine(cfg)
@@ -111,8 +108,7 @@ def test_a_streamed_response_ends_when_its_stream_does_not_when_its_headers_leav
 
 
 class _RewritingOverlay:
-    """A real overlay's shape: it returns a NEW Response rather than the one it was handed.
-    `NoOverlay` returns the same object, so it cannot show the addon assigning a new one."""
+    """An overlay that returns a new Response, unlike `NoOverlay`, which returns the one it got."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -134,15 +130,10 @@ class _RewritingOverlay:
 
 
 def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_path, monkeypatch):
-    """`responseheaders` streams any live `text/event-stream` response, `kind: read`
-    included, and mitmproxy never assembles a streamed body. An overlay called there would see
-    `body == b""` and return a new Response, which the addon would then assign to the flow -
-    turning a streamed read into a buffered, empty-bodied one. It presents as "reads through the
-    proxy mysteriously return nothing", and only for streaming endpoints.
+    """A streamed read never reaches the overlay, and its chunks reach the client unchanged.
 
-    Both halves are asserted, because either one alone would let the bug back in: the overlay is
-    never called, and the chunks reach the client unchanged.
-    """
+    mitmproxy never assembles a streamed body, so an overlay would see `b""` and replace the
+    stream with an empty buffered body."""
     srv = serve(StreamUpstream)
     cfg = engine_config(
         tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, READ_STREAM_MAP)
@@ -150,9 +141,8 @@ def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_pat
     overlay = _RewritingOverlay()
     eng, seen, stop = start_engine(cfg, overlay=overlay)
     try:
-        # A faked write first, so the overlay WOULD be asked about this read if it were not
-        # streamed: with an empty write log it is never asked at all, and this test would pass
-        # without the streaming guard.
+        # A faked write first: with an empty write log the overlay is never asked at all, and
+        # this test would pass without the streaming guard.
         via_proxy(eng.listen_port(), "POST", f"http://127.0.0.1:{srv}/w", body=b"{}")
         conn = http.client.HTTPConnection("127.0.0.1", eng.listen_port(), timeout=5)
         url = f"http://127.0.0.1:{srv}/v1/chat/completions"
@@ -174,7 +164,7 @@ def test_an_overlay_is_not_handed_a_streamed_read_and_cannot_rewrite_one(tmp_pat
 
 
 def test_a_json_response_is_still_buffered_and_recorded(tmp_path, monkeypatch, upstream):
-    """The hook keys on the content type, so an ordinary live read is unaffected."""
+    """A live JSON read is buffered and recorded whole, since streaming keys on the content type."""
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch))
     eng, seen, stop = start_engine(cfg)
     try:

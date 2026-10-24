@@ -1,5 +1,4 @@
-"""The overlay through the engine: a run's reads show its own faked writes, and no one
-else's."""
+"""The overlay through the engine: a run's reads show its own faked writes, and no one else's."""
 
 from irimi.core.exchange import Flag, Response
 from irimi.decide.overlay import Overlaid
@@ -50,8 +49,7 @@ def _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay):
 
 
 def test_a_run_s_requests_see_its_own_writes_alone(tmp_path, monkeypatch, upstream):
-    """The write log is per run: a write faked in one run is handed to the policy and the overlay
-    for that run's later requests, and never for another run's."""
+    """A faked write reaches the policy and overlay for its own run's requests, never another's."""
     decided = []
     overlaid = []
 
@@ -151,8 +149,9 @@ def test_an_overlay_that_raises_does_not_break_the_read(tmp_path, monkeypatch, u
 def test_a_rewritten_read_reaches_the_upstream_translated_and_is_recorded_that_way(
     tmp_path, monkeypatch, upstream
 ):
-    """What the translation dropped stays in irimi: the overlay is handed it with the response,
-    and neither the service nor the trace sees a header of irimi's."""
+    """A translated read reaches the service and the trace without any header of irimi's.
+
+    What the translation dropped is handed to the overlay with the response."""
     from dataclasses import replace
 
     def translate(request):
@@ -214,11 +213,7 @@ def test_the_overlay_is_not_asked_about_a_read_before_any_write(tmp_path, monkey
 
 
 def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, monkeypatch, upstream):
-    """irimi's vocabulary is never the agent's. The engine strips an agent's own
-    `irimi-rewrote` in `request()` before the overlay is asked, so it never reaches the real
-    service on the rewrite path either. It is the non-empty-log twin of
-    `test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write`.
-    """
+    """An agent's own `irimi-rewrote` is stripped before the overlay is asked about a read."""
     overlay = _OverlayDouble()
     eng, _seen, stop = _engine_with_a_write(tmp_path, monkeypatch, upstream, overlay)
     try:
@@ -238,14 +233,9 @@ def test_a_rewrote_header_the_agent_sent_is_not_forwarded_upstream(tmp_path, mon
 def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write(
     tmp_path, monkeypatch, upstream
 ):
-    """The engine's rewrite path is closed until the write log holds a write, so the overlay's own
-    strip cannot run before then. The engine strips the header in `request()` whatever the log
-    holds, so irimi's vocabulary never reaches the real service on a read irimi did not touch.
+    """The engine strips every agent-sent `irimi-rewrote` even while the write log is empty.
 
-    `start_engine` with no overlay gives `NoOverlay`, whose `rewrite` translates nothing, so nothing
-    but the engine could have removed the header here. Sent twice, in two spellings:
-    a forged repeat has to lose every instance, not the first.
-    """
+    `NoOverlay` translates nothing, so only the engine can have removed both spellings."""
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch))
     eng, _seen, stop = start_engine(cfg)
     try:
@@ -272,8 +262,7 @@ def test_a_rewrote_header_the_agent_sent_is_stripped_before_the_runs_first_write
 def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
     tmp_path, monkeypatch, upstream
 ):
-    """The Exchange records what irimi asked the service. It did not ask with this header, and a
-    trace that showed one would credit irimi with the agent's forgery."""
+    """The recorded request omits an agent-sent `irimi-rewrote`, which irimi never sent."""
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch))
     eng, seen, stop = start_engine(cfg)
     try:
@@ -290,8 +279,9 @@ def test_a_rewrote_header_the_agent_sent_is_kept_out_of_the_recorded_request(
 def test_no_rewrote_header_reaches_the_upstream_on_a_translated_read(
     tmp_path, monkeypatch, upstream
 ):
-    """The forgery is gone, and the translation adds none of irimi's own: the overlay learns what
-    was dropped from the engine, never from a header the agent could have sent."""
+    """A translated read carries neither the agent's `irimi-rewrote` nor one of irimi's own.
+
+    The overlay learns what was dropped from the engine, never from a header."""
     from dataclasses import replace
 
     def translate(request):
@@ -321,8 +311,7 @@ def test_no_rewrote_header_reaches_the_upstream_on_a_translated_read(
 def test_a_write_carrying_a_rewrote_header_is_still_faked_and_records_none(
     tmp_path, monkeypatch, upstream
 ):
-    """A write is answered locally, so the header never leaves the machine either way - but it must
-    not survive on the recorded request, where a trace reader would read it as irimi's."""
+    """A faked write's recorded request omits an agent-sent `irimi-rewrote`."""
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch))
     eng, seen, stop = start_engine(cfg)
     try:

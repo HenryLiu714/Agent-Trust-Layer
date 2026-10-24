@@ -23,9 +23,6 @@
   "tests/e2e/workflows/test_w10_flaky_upstream.py": {
     "issue_ref": 3
   },
-  "tests/engine/test_bounded_decoding.py": {
-    "caps_run": 4
-  },
   "tests/safety/test_scope_rule.py": {
     "caps_run": 4
   },

@@ -1,11 +1,6 @@
-"""`ReplayPolicy` through a real engine: a run is recorded under shadow mode into a real
-`DirectoryStore`, read back, and replayed against a Stripe-shaped stub and an LLM stub on loopback,
-each of which writes down every request it is given, so a test can prove what the replay never
-sent anywhere.
+"""`ReplayPolicy` through a real engine: record a run under shadow, then replay it against stubs.
 
-The maps are a test map's, not the shipped ones: the stubs live on loopback, and map hosts carry no
-port, so the Stripe stub is `127.0.0.1` and the LLM stub is `localhost`.
-"""
+The test maps put the Stripe stub on `127.0.0.1` and the LLM stub on `localhost`."""
 
 import asyncio
 import dataclasses
@@ -45,8 +40,7 @@ from tests.support.upstreams import REPLAY_CHARGE, Answer
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
-    """`$IRIMI_HOME`: the CA, the redaction key and the store. Empty when the maps load, so a
-    developer's own `maps.yaml` is not merged into them."""
+    """Return an empty `$IRIMI_HOME` for the CA, redaction key and store."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
     return tmp_path / "home"
 
@@ -61,8 +55,9 @@ def maps(tmp_path, home):
 
 
 class _Session:
-    """One engine over the test maps, answering by `policy` and recording into the store under
-    `home`. `call` sends one request through it; `stop` closes it, and its store with it."""
+    """One engine over the test maps, answering by `policy` and recording under `home`.
+
+    `call` sends one request through it; `stop` stops it and closes its store."""
 
     def __init__(self, home, maps, policy, run_id):
         p = ca.ca_paths()
@@ -118,8 +113,9 @@ def _record_run(home, maps, script):
 
 
 def _replay(stubs, home, maps, events, script, run_id="rep"):
-    """Run `script(session)` as a replay of `events`, as the run `run_id`, with every request
-    either stub saw so far forgotten. Returns the session, stopped."""
+    """Run `script(session)` as `run_id`, a replay of `events`; return the stopped session.
+
+    Both stubs forget what they saw first."""
     stubs.forget()
     recording = ReplayIndex.from_events(events, redact.load_key(home), maps)
     policy = ReplayPolicy(recording, maps=maps)
@@ -154,8 +150,9 @@ def _charge(session, stripe):
 def test_an_llm_call_that_differs_only_in_who_asked_is_answered_from_the_recording(
     home, maps, replay_stubs
 ):
-    """`metadata` and `stream_options` say who asked and how, never what: the call is a hit,
-    served byte for byte and stamped `recording`, and the model is never asked."""
+    """An LLM call differing only in `metadata` and `stream_options` is served from the recording.
+
+    It is served byte for byte, stamped `recording`, and the model is never asked."""
     _, llm = replay_stubs
     url, body = _message(llm)
     recorded = []
@@ -180,8 +177,7 @@ def _j(document):
 
 
 def test_a_cache_control_block_anywhere_does_not_change_the_match(home, maps, replay_stubs):
-    """A prompt-caching hint is removed at any depth, so a system prompt sent as a block with one
-    matches the same block recorded without it."""
+    """A `cache_control` hint at any depth is ignored when matching against the recording."""
     _, llm = replay_stubs
     url = f"http://localhost:{llm}/v1/messages"
     block = {"type": "text", "text": "Be brief."}
@@ -209,8 +205,7 @@ def test_a_changed_system_prompt_is_a_miss_that_asks_the_model(home, maps, repla
 
 
 def test_a_recorded_stream_answers_a_streaming_call_and_never_a_plain_one(home, maps, replay_stubs):
-    """A streamed answer is served as its joined chunks to a call that asks to stream. The same
-    prompt asked without streaming is a miss: it gets an answer of its own, from the model."""
+    """A recorded stream answers a streaming call; the same prompt unstreamed is a miss."""
     _, llm = replay_stubs
     url, streaming = _message(llm, stream=True)
     recorded: dict = {}
@@ -239,8 +234,7 @@ def test_a_recorded_stream_answers_a_streaming_call_and_never_a_plain_one(home, 
 def test_a_secret_in_a_request_body_matches_its_placeholder_in_the_recording(
     home, maps, replay_stubs
 ):
-    """The recording holds the secret's placeholder. The live call is redacted with the same
-    key before it is keyed, so the same secret matches, and another does not."""
+    """A live call is redacted before matching, so the same secret matches and another does not."""
     _, llm = replay_stubs
     url, body = _message(llm, system=f"The key is {PROMPT_SECRET}.")
     events = _record_run(home, maps, lambda s: s.call("POST", url, body))
@@ -257,8 +251,7 @@ def test_a_secret_in_a_request_body_matches_its_placeholder_in_the_recording(
 
 
 def test_a_read_is_answered_once_per_time_it_was_recorded(home, maps, replay_stubs):
-    """Each recorded read answers once: two recorded, two answered from the recording, and the
-    third reaches the stub."""
+    """Each recorded read answers once: two recorded reads answer two, and the third goes live."""
     stripe, _ = replay_stubs
     events = _record_run(home, maps, lambda s: [_charge(s, stripe) for _ in range(2)])
     replies: list = []
@@ -293,9 +286,9 @@ def _refund_then_read_it(stripe, amount=100, key="k-1"):
 
 
 def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, replay_stubs):
-    """A different `Idempotency-Key` header is not a different write.
-    It is answered with the recorded body at the recorded level, with the recorded L3 outcome and
-    currency, and the read of the id it minted is answered from the recording too."""
+    """The same write with another `Idempotency-Key` gets the recorded answer, check and currency.
+
+    The read of the id it minted is answered from the recording too."""
     stripe, _ = replay_stubs
     events = _record_run(home, maps, _refund_then_read_it(stripe))
     recorded = next(ex for ex in events if ex.kind == "write")
@@ -313,8 +306,7 @@ def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, replay_
     )
     assert write.flags == (Flag.FROM_RECORDING,)
     assert write.would_fire == ("refund.created",)
-    # Stripe has never heard of the minted id, so the overlay answered its read when it was
-    # recorded: it is still the overlay's answer, from the recording.
+    # Stripe has never heard of the minted id, so the recorded read is the overlay's answer.
     assert (read.answered_by, read.flags, read.overlay) == (
         "overlay",
         (Flag.FROM_RECORDING,),
@@ -325,9 +317,7 @@ def test_the_same_write_is_answered_with_the_recorded_answer(home, maps, replay_
 
 
 def test_a_different_write_is_faked_and_checked_against_the_recorded_read(home, maps, replay_stubs):
-    """The amount changed, so the recording has no answer: shadow mode fakes it, never forwards it,
-    and decides its precondition from the recording's own read of the charge. The stub is not
-    asked for the charge: a replay never checks a precondition against live state."""
+    """A changed write is faked and checked against the recording's read, never live state."""
     stripe, _ = replay_stubs
     events = _record_run(home, maps, lambda s: _post_refund(s, stripe, 100))
     session = _replay(replay_stubs, home, maps, events, lambda s: _post_refund(s, stripe, 250))
@@ -352,7 +342,7 @@ def test_a_write_the_recording_would_reject_is_rejected(home, maps, replay_stubs
 
 
 def test_a_missed_write_with_no_recorded_read_is_not_evaluable(home, maps, replay_stubs):
-    """The recording made no read of this charge, and the replay does not make one either."""
+    """A missed write with no recorded read is not evaluable, and the replay makes no read."""
     stripe, llm = replay_stubs
     url, body = _message(llm)
     events = _record_run(home, maps, lambda s: s.call("POST", url, body))
@@ -365,8 +355,7 @@ def test_a_missed_write_with_no_recorded_read_is_not_evaluable(home, maps, repla
 
 
 def test_a_recorded_read_that_failed_is_served_again_to_the_precondition(home, maps, replay_stubs):
-    """The recorded run's read of the charge got a 500, so a write that misses is checked against
-    that 500 and not against the stub, which now answers 200: the write stays L2, as it was."""
+    """A missed write is checked against the recorded 500, not the stub's 200: not evaluable."""
     stripe, _ = replay_stubs
     replay_stubs.stripe.answers["/v1/charges/ch_REAL1"] = Answer(500, REPLAY_CHARGE)
     events = _record_run(home, maps, lambda s: _post_refund(s, stripe, 100))
@@ -381,8 +370,9 @@ def test_a_recorded_read_that_failed_is_served_again_to_the_precondition(home, m
 def test_after_a_write_misses_a_recorded_read_goes_live_and_shows_the_new_write(
     home, maps, replay_stubs
 ):
-    """The recorded read of the charge shows the recorded refund. Once the refund missed, that is
-    not this run's world: the read goes to the stub and the overlay applies the new refund."""
+    """After a write misses, the recorded read goes live and the overlay applies the new write.
+
+    The recorded read shows the recorded refund, which this run did not make."""
     stripe, _ = replay_stubs
 
     def script(amount):
@@ -408,11 +398,9 @@ def test_after_a_write_misses_a_recorded_read_goes_live_and_shows_the_new_write(
 
 
 def test_a_miss_whose_upstream_then_fails_still_says_it_missed(home, maps, replay_stubs):
-    """A read whose recorded upstream failed holds no answer to serve, so the replay misses and
-    forwards it, and the stub hangs up again. The exchange keeps the policy's `replay-miss` beside
-    the engine's `upstream-error`, as one whose upstream answered keeps it: the answer's own flags
-    are kept on every path. Under shadow mode a live answer has none, and gets only its
-    `upstream-error`."""
+    """A miss whose upstream fails keeps `replay-miss` beside `upstream-error`.
+
+    A read whose recorded upstream failed has no answer to serve, so it is forwarded."""
     stripe, _ = replay_stubs
     url = f"http://127.0.0.1:{stripe}/v1/charges/ch_RESET"
     events = _record_run(home, maps, lambda s: s.call("GET", url))
@@ -442,8 +430,7 @@ def test_a_matcher_that_raises_decides_a_miss_and_still_never_forwards_a_write(
 
 
 def test_a_replay_stamps_every_answer_it_decided(home, maps, replay_stubs):
-    """The stamping rule holds in a replay: an answer from the recording says `recording`, a
-    replayed write its recorded level, and a live forward nothing."""
+    """The answered-by header holds in a replay, for recorded answers, faked writes and forwards."""
     stripe, llm = replay_stubs
     url, body = _message(llm)
 
@@ -468,10 +455,9 @@ def test_a_replay_stamps_every_answer_it_decided(home, maps, replay_stubs):
 def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(
     home, maps, replay_stubs
 ):
-    """A replay answers with a response read off disk, whose headers need not encode as latin-1.
-    `ReplayIndex.answer_for` keeps such a recording from being served, and the engine's own guard is
-    the second half: building the response raised out of the request hook, which forwarded the
-    write. It is answered as a decision that raised is."""
+    """An answer whose headers cannot encode as latin-1 gets irimi's 502 and forwards nothing.
+
+    `ReplayIndex.answer_for` refuses such a recording; this is the engine's own guard behind it."""
     stripe, _ = replay_stubs
 
     class _Unsendable:
@@ -493,9 +479,7 @@ def test_an_answer_the_engine_cannot_send_fails_closed_and_forwards_nothing(
 
 
 def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, maps, replay_stubs):
-    """The decision returned, so the precondition read it made is in hand: an answer the engine
-    then cannot send is refused, and that read is still recorded after the refusal, as every read
-    irimi made on the agent's behalf is. A decision that raises instead is a different case."""
+    """A check read is still recorded, after the refusal, when its decision cannot be sent."""
     stripe, _ = replay_stubs
     url = f"http://127.0.0.1:{stripe}/v1/charges/ch_REAL1"
     probe = Request("GET", "http", "127.0.0.1", stripe, "/v1/charges/ch_REAL1", "", (), b"")
@@ -535,10 +519,9 @@ def test_the_reads_an_answer_issued_are_recorded_when_it_cannot_be_sent(home, ma
 def test_a_read_the_overlay_translates_is_recorded_translated_whoever_answers_it(
     home, maps, replay_stubs
 ):
-    """A page whose cursor names the refund the run minted is translated before it is forwarded,
-    and recorded so. The engine translates a read before the policy decides, so a
-    replay looks the translated read up, records it translated too, and a replay of that replay
-    finds it the same way. Neither replay sends the stub anything."""
+    """A translated read is recorded translated, and found so by a replay and a replay of that.
+
+    Neither replay sends the stub anything."""
     stripe, _ = replay_stubs
 
     def script(session):
@@ -630,9 +613,7 @@ def _carries_a_translation(plan):
 def test_the_engine_asks_and_records_a_read_translated_and_edits_only_a_forwarded_flow(
     home, maps, answer, on_the_flow
 ):
-    """The engine translates a read before the policy decides, so the policy is asked, and the
-    trace records, the read as irimi would ask it whoever answers; only a read forwarded live
-    carries the translation onto the flow."""
+    """The policy sees and the trace records a read translated; only a forward edits the flow."""
     policy, overlay = _Asked(answer), _Translating()
     decision = _decided(home, maps, policy, overlay)
     assert [r.query for r in policy.asked] == ["translated=1"]
@@ -641,8 +622,7 @@ def test_the_engine_asks_and_records_a_read_translated_and_edits_only_a_forwarde
 
 
 def test_the_engine_never_translates_a_delegated_read(home, tmp_path, refused_port):
-    """A delegated read's target owns that service's state, so the overlay never touches it,
-    on either side."""
+    """A read sent to a target is never translated: the target owns that service's state."""
     maps_dir = tmp_path / "targeted"
     maps_dir.mkdir()
     (maps_dir / "stripe.yaml").write_text(REPLAY_STRIPE_MAP)
@@ -661,9 +641,7 @@ def test_the_engine_never_translates_a_delegated_read(home, tmp_path, refused_po
 
 
 def test_a_read_recorded_after_a_write_the_replay_did_not_make_goes_live(home, maps, replay_stubs):
-    """The recorded run refunded and then read the charge, which showed the refund. A replay that
-    reads the charge without refunding - a prompt edit stopped it - is not shown a refund it never
-    made: the read misses, the replay diverges, and the stub answers it."""
+    """A replay that skips the recorded refund is not shown it: the read after it goes live."""
     stripe, _ = replay_stubs
 
     def refund_then_read(session):
@@ -682,10 +660,7 @@ def test_a_read_recorded_after_a_write_the_replay_did_not_make_goes_live(home, m
 
 
 def test_an_unchanged_replay_compares_the_same_as_its_recording(home, maps, replay_stubs):
-    """What `irimi compare` and the replay's diff rest on: a replay that changes nothing prints
-    every write, and the `↳` line under it, as its recording printed them, so every compared row
-    is `=`. The run reads the charge, refunds it, reads it again through the overlay and pages
-    the refunds after the one it minted; the replay answers all of it from the recording."""
+    """An unchanged replay prints every write and `↳` line as its recording did, all rows `=`."""
     from irimi.core import exitcodes
     from irimi.replay import compare
     from irimi.report.model import RunView

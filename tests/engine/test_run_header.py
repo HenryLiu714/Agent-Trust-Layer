@@ -114,8 +114,7 @@ def test_the_precondition_read_never_carries_the_run_header_and_both_exchanges_a
 def test_a_failed_decision_is_attributed_from_the_run_header_it_stripped(
     tmp_path, monkeypatch, upstream, refused_port
 ):
-    """The 502 path attributes the run itself, from the value `request()` read before it stripped
-    the header - the request it is handed no longer carries one."""
+    """A failed decision's 502 is attributed from the run header the request hook stripped."""
     maps = targeted_index(
         tmp_path,
         monkeypatch,
@@ -145,8 +144,7 @@ def test_a_failed_decision_is_attributed_from_the_run_header_it_stripped(
 
 
 def test_every_other_header_is_forwarded_untouched(engine, upstream):
-    """Only irimi's own header is stripped: a W3C trace context the agent propagates reaches the
-    service exactly as sent."""
+    """Only irimi's own header is stripped: a W3C trace context reaches the service as sent."""
     eng, seen = engine
     traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
     via_proxy(
@@ -160,12 +158,13 @@ def test_every_other_header_is_forwarded_untouched(engine, upstream):
     assert ("traceparent", traceparent) in seen[0].request.headers
 
 
-# ------------------------------------ a run id names a directory; every exchange is timed
+# ---------------------------------------------------------------- a run id names a directory
 
 
 def test_an_invalid_run_header_is_stripped_and_the_exchange_keeps_the_engines_run(engine, upstream):
-    """`../x` would name a directory outside the trace store, so it is no run id: the
-    exchange keeps the engine's own. It is still stripped, like any other value."""
+    """A run header of `../x` is stripped, and the exchange keeps the engine's run id.
+
+    `../x` would name a directory outside the trace store."""
     eng, seen = engine
     status, _ = via_proxy(
         eng.listen_port(),

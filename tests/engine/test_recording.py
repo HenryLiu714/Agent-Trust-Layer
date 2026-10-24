@@ -10,7 +10,7 @@ from tests.support.engine import engine_config
 
 
 class _RecordingStore:
-    """A RunStore that remembers what it was handed. NullStore cannot answer this question."""
+    """A RunStore that remembers what it was handed."""
 
     def __init__(self):
         self.recorded = []
@@ -23,8 +23,7 @@ class _RecordingStore:
 
 
 def _addon(tmp_path, monkeypatch, store):
-    """An IrimiAddon with no proxy under it. `session.record` is a plain method; driving a whole
-    engine would only add a thread between the assertion and the thing asserted."""
+    """An IrimiAddon with no proxy under it, since `session.record` is a plain method."""
     from irimi.engine.mitm import IrimiAddon
 
     seen: list[Exchange] = []
@@ -54,10 +53,9 @@ def _exchange(kind, answered_by="live"):
 
 
 def test_telemetry_is_reported_and_stored_only_as_having_happened(tmp_path, monkeypatch):
-    """Forwarded in every mode, counted in its own bucket, and stored only as having happened:
-    one `TelemetrySeen` line with its host and time, so a stored run's summary can count
-    it, and never its request or response - a recording of the agent's own observability traffic
-    would re-emit someone else's events on replay. So no blob is written for its body."""
+    """Telemetry is stored as one `TelemetrySeen` line with its host and time, and no body.
+
+    A replay of the agent's own observability traffic would re-emit someone else's events."""
     from dataclasses import replace
 
     from irimi.protocol.trace import TelemetrySeen
@@ -84,9 +82,9 @@ def test_telemetry_is_reported_and_stored_only_as_having_happened(tmp_path, monk
 def test_a_store_that_raises_neither_escapes_the_hook_nor_hides_the_exchange(
     tmp_path, monkeypatch, caplog
 ):
-    """A recording failure never affects traffic. `RunStore.record` may not raise, and
-    `session.record` guards it anyway: a store that broke the contract escaped every hook that
-    finishes a flow, and took the terminal line and the summary's count of the exchange with it."""
+    """A store that raises neither escapes `session.record` nor drops the exchange's line.
+
+    `RunStore.record` may not raise; the session guards it anyway (fail-closed hook rule)."""
 
     class _Raising(_RecordingStore):
         def record(self, exchange):

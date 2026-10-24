@@ -19,8 +19,9 @@ def _history(posted):
 
 
 def _replies(posted):
-    """One real message in whatever thread is asked about. Any other thread than `REAL_SLACK_TS`
-    is `thread_not_found` at HTTP 200, which is how a read of a thread irimi minted arrives."""
+    """Return one real message for `REAL_SLACK_TS`, and `thread_not_found` at 200 for any thread.
+
+    That error is how Slack answers a read of a thread irimi minted."""
     if posted.get("ts") != REAL_SLACK_TS:
         return {"ok": False, "error": "thread_not_found"}
     return _history(posted)
@@ -33,7 +34,7 @@ SLACK_READS = {"/api/conversations.history": _history, "/api/conversations.repli
 
 @pytest.fixture
 def slack_stub(tmp_path, monkeypatch):
-    """`stripe_stub`'s twin over SLACK_OVERLAY_MAP. Yields (proxy port, stub port, exchanges)."""
+    """Yield (proxy port, stub port, exchanges) for an engine over SLACK_OVERLAY_MAP."""
     from irimi.decide.overlay import ServiceOverlay
 
     slack = serve(FakeSlack, threaded=True, methods=SLACK_READS)
@@ -63,12 +64,11 @@ def test_a_slack_history_read_after_a_faked_post_shows_the_post_first(slack_stub
 
 
 def test_a_slack_history_read_of_another_channel_is_forwarded_unstamped(slack_stub):
-    """Two different channel ids are a definite no, not a "cannot tell": the read is left as
-    Slack sent it and is not `partial`."""
+    """A read of another channel id is left as Slack sent it, and is not `partial`."""
     proxy, stub, seen = slack_stub
     status, _, _ = slack_call(proxy, stub, "chat.postMessage", {"channel": "C0123", "text": "hi"})
     assert status == 200
-    # The log holds a faked write, so the overlay IS asked about the read below.
+    # The log holds a faked write, so the overlay is asked about the read below.
     assert seen[-1].kind == "write" and seen[-1].answered_by.startswith("fake-")
     status, headers, data = slack_call(proxy, stub, "conversations.history", {"channel": "C0999"})
     assert status == 200
@@ -79,8 +79,7 @@ def test_a_slack_history_read_of_another_channel_is_forwarded_unstamped(slack_st
 
 
 def test_a_slack_replies_read_after_a_faked_reply_shows_it_at_the_tail(slack_stub):
-    """A replies read after a faked reply: the reply last, the parent's counts moved, the whole
-    page stamped `overlay` - and the post itself never reached Slack."""
+    """A replies read shows a faked reply last and the parent's counts moved, stamped `overlay`."""
     proxy, stub, seen = slack_stub
     status, _, data = slack_call(
         proxy,
@@ -106,9 +105,9 @@ def test_a_slack_replies_read_after_a_faked_reply_shows_it_at_the_tail(slack_stu
 
 
 def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alone(slack_stub):
-    """`chat.postMessage` takes `#general`, `conversations.history` requires the id, and irimi's own
-    echo carries the posted spelling - so the two sides cannot be matched. The body is left exactly
-    as Slack sent it and the exchange says the world irimi showed is incomplete."""
+    """A post to `#general` cannot be matched to a read by channel id, so the read is `partial`.
+
+    The body is left exactly as Slack sent it."""
     proxy, stub, seen = slack_stub
     status, _, _ = slack_call(
         proxy, stub, "chat.postMessage", {"channel": "#general", "text": "hi"}
@@ -123,9 +122,9 @@ def test_a_slack_read_the_effects_cannot_place_is_recorded_partial_and_left_alon
 
 
 def test_a_faked_post_answers_with_its_thread_or_with_no_thread_key_through_the_proxy(slack_stub):
-    """Off the real proxy, a threaded post's own answer names the thread it was
-    posted in, and a top-level post's answer has no `thread_ts` key at all - not a `null` one,
-    which real Slack never sends. Neither reached Slack."""
+    """A faked threaded post names its thread; a top-level one has no `thread_ts` key at all.
+
+    Real Slack never sends a `null` `thread_ts`."""
     proxy, stub, _ = slack_stub
     status, _, data = slack_call(
         proxy,
@@ -144,9 +143,9 @@ def test_a_faked_post_answers_with_its_thread_or_with_no_thread_key_through_the_
 
 
 def test_a_slack_replies_read_of_a_minted_thread_is_answered_not_thread_not_found(slack_stub):
-    """A minted Slack thread read back, end to end. The agent posts, then reads the thread its
-    own post started - which Slack has never heard of and refuses at HTTP 200. irimi answers with
-    the thread from its write log, and the post still never reached Slack."""
+    """irimi answers a read of a thread its faked post started from the write log.
+
+    Slack has never heard of the thread and would refuse it at HTTP 200."""
     proxy, stub, seen = slack_stub
     status, _, data = slack_call(
         proxy, stub, "chat.postMessage", {"channel": "C0123", "text": "refunded"}

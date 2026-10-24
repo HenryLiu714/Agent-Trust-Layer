@@ -1,5 +1,4 @@
-"""Base-URL mode, for SDKs that ignore proxy settings: an origin-form request addressed
-to the listener itself."""
+"""Base-URL mode, for SDKs that ignore proxy settings: requests addressed to the listener."""
 
 import json
 import socket
@@ -51,8 +50,9 @@ def test_a_base_url_read_reaches_its_tls_upstream(tmp_path, monkeypatch):
 
 
 def test_a_base_url_request_to_an_unlisted_host_is_403(engine):
-    """A refusal is irimi's own JSON error, and it is recorded: a request sent by base URL to a
-    host irimi does not relay is in the trace, flagged `refused`, and a GET stays a read."""
+    """A base-URL request to an unlisted host gets irimi's JSON 403 and is recorded `refused`.
+
+    A refused GET stays a read."""
     eng, seen = engine
     status, data = via_base_url(eng.listen_port(), "GET", "/api.stripe.com/v1")
     assert status == 403
@@ -72,8 +72,7 @@ def test_a_base_url_request_to_an_unlisted_host_is_403(engine):
 
 
 def test_a_refused_post_is_still_listed_among_the_writes(engine):
-    """The same refusal for a POST is classified as one, so the summary names it a write irimi
-    refused rather than dropping it."""
+    """A refused base-URL POST is listed in the summary as a write irimi refused."""
     eng, seen = engine
     status, _ = via_base_url(eng.listen_port(), "POST", "/api.stripe.com/v1/refunds", body=b"{}")
     assert status == 403
@@ -148,7 +147,7 @@ def test_an_absolute_url_naming_the_listener_is_base_url_mode(tmp_path, monkeypa
 
 @pytest.mark.parametrize("host_name", ["0.0.0.0", "127.1", "[::ffff:127.0.0.1]"])
 def test_a_self_addressed_alias_is_base_url_mode_not_a_loop(tmp_path, monkeypatch, host_name):
-    # Any spelling of "this listener" must take the door; forwarding it would make the proxy
+    # Any spelling of "this listener" is base-URL mode; forwarding it would make the proxy
     # connect to itself and re-receive the same request until the ports run out.
     cfg = engine_config(tmp_path, monkeypatch, reverse_hosts=frozenset({"127.0.0.1"}))
     eng, seen, stop = start_engine(cfg)

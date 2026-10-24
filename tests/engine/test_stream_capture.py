@@ -33,8 +33,7 @@ from tests.support.upstreams import SSE_FIRST, SSE_SECOND, StreamUpstream, serve
 
 
 def _stream_three_chunks(tmp_path, monkeypatch, store=None):
-    """THREE_CHUNKS through the proxy, each held by the upstream until the client has read the
-    one before, so the client provably gets each chunk before the next is sent. The exchanges."""
+    """Stream THREE_CHUNKS through the proxy, each sent only once the last is read; return seen."""
     gates = [threading.Event(), threading.Event()]
     srv = stream_server(THREE_CHUNKS, gates)
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
@@ -59,8 +58,7 @@ def _stream_three_chunks(tmp_path, monkeypatch, store=None):
 def test_a_streamed_response_is_recorded_as_its_chunks_joined_with_each_chunk_s_length(
     tmp_path, monkeypatch
 ):
-    """The agent gets each chunk as it arrives, and the exchange holds the whole stream - its
-    body the chunks joined, `stream_chunks` their lengths in arrival order."""
+    """A streamed body is recorded as the chunks joined, with their lengths in arrival order."""
     (ex,) = _stream_three_chunks(tmp_path, monkeypatch)
     assert (ex.kind, ex.answered_by, ex.flags) == ("llm", "live", ())
     assert ex.response is not None and ex.response.body == b"".join(THREE_CHUNKS)
@@ -80,9 +78,9 @@ def test_a_streamed_response_is_stored_and_read_back_with_its_body_and_chunks(
 
 
 def test_a_stream_longer_than_the_stored_maximum_reaches_the_client_whole(tmp_path, monkeypatch):
-    """The copy stops at MAX_STORED_BODY and the stream does not: the client gets all 9 MiB, and
-    the exchange keeps the first 8 MiB and says it is not the whole stream. Each MiB is 1024
-    lines, so the cap falls at the end of a line and the whole 8 MiB is kept."""
+    """The client gets all 9 MiB; the exchange keeps the first 8 MiB, flagged truncated.
+
+    Each MiB is 1024 lines, so the cap falls at a line end and the whole 8 MiB is kept."""
     mib = 1024 * 1024
     chunks = [(bytes([ord("a") + i]) * 1023 + b"\n") * 1024 for i in range(9)]
     srv = stream_server(chunks)
@@ -103,8 +101,7 @@ def test_a_stream_longer_than_the_stored_maximum_reaches_the_client_whole(tmp_pa
 
 
 def test_a_copy_that_raises_stops_the_recording_and_never_the_stream(tmp_path, monkeypatch):
-    """The tee's own copy raises on the second chunk. The client still gets every byte, the
-    recording keeps what it copied before, and says it is not the whole stream."""
+    """A copy that raises keeps what it copied, flagged truncated; the client gets every byte."""
     calls = itertools.count(1)
     capture = StreamCapture._capture
 
@@ -123,9 +120,7 @@ def test_a_copy_that_raises_stops_the_recording_and_never_the_stream(tmp_path, m
 def test_an_upstream_reset_mid_stream_is_recorded_with_what_arrived_and_flagged(
     tmp_path, monkeypatch
 ):
-    """A chunked stream that loses its upstream after the first chunk ends in the `error` hook.
-    The agent already has the headers and that chunk, so the exchange keeps them, and says both
-    that the upstream failed and that the recorded body is not the whole stream."""
+    """A stream reset after one chunk keeps it, flagged upstream error and truncated."""
     # Reset only once the client has the first chunk: a reset that overtakes data the proxy has
     # not read yet takes that data with it.
     gate = threading.Event()
@@ -152,8 +147,7 @@ def test_an_upstream_reset_mid_stream_is_recorded_with_what_arrived_and_flagged(
 
 
 def test_a_stream_over_tls_is_recorded_as_its_chunks(tmp_path, monkeypatch):
-    """The tee sits on mitmproxy's HTTP layer, above TLS, so a stream from an HTTPS upstream is
-    recorded as a plain one is. Through the reverse door, which always dials HTTPS."""
+    """A stream from an HTTPS upstream is recorded as a plain one is, through base-URL mode."""
     cfg = engine_config(
         tmp_path,
         monkeypatch,
@@ -196,9 +190,7 @@ def test_a_stream_over_tls_is_recorded_as_its_chunks(tmp_path, monkeypatch):
 def test_a_reset_inside_a_character_records_only_the_complete_lines_before_it(
     tmp_path, monkeypatch
 ):
-    """The last read before a reset can end anywhere, inside a UTF-8 character included. A body
-    that does not decode is stored unscanned, so the recording keeps only its complete
-    lines: the key on the first line is then redacted like any other."""
+    """A reset inside a UTF-8 character keeps only complete lines, so redaction can read them."""
     secret = TORN_STREAM_SECRET
     first = b'data: {"api_key": "' + secret.encode() + b'"}\n\n'
     torn = b'data: {"text": "caf\xc3'  # the first byte of a two-byte character
@@ -231,9 +223,7 @@ def test_a_reset_inside_a_character_records_only_the_complete_lines_before_it(
 
 
 def test_a_compressed_stream_is_recorded_decoded_as_one_chunk(tmp_path, monkeypatch):
-    """A body is recorded as `_body` reads a buffered one, `Content-Encoding` decoded, so
-    redaction reads text and not gzip. Decoded bytes do not split where the wire's did, so the
-    body is one chunk. The client gets the compressed bytes it was sent."""
+    """A gzip stream is recorded decoded as one chunk; the client gets the compressed bytes."""
     plain = b"".join(THREE_CHUNKS)
     packed = gzip.compress(plain)
     half = len(packed) // 2
@@ -259,8 +249,7 @@ def test_a_compressed_stream_is_recorded_decoded_as_one_chunk(tmp_path, monkeypa
 
 
 def test_a_streamed_read_is_not_observed_now_that_its_body_is_recorded(tmp_path, monkeypatch):
-    """A streamed body is recorded, and `services.observe_read` never sees one: a stream is not
-    a document an observer can read, and its copy may be cut short."""
+    """`services.observe_read` never sees a streamed body, which may be cut short."""
     observed = []
     monkeypatch.setattr(
         services, "observe_read", lambda service, body, clock: observed.append(body)
@@ -296,8 +285,7 @@ def small_cap(monkeypatch):
 
 
 def test_a_capped_stream_is_recorded_up_to_its_last_complete_line(small_cap):
-    """The cap cuts the copy inside a character here. The recorded body ends at the last line
-    end before it, so it is text redaction can read, with no half of anything on it."""
+    """A cap inside a character records the body up to the last line end before it."""
     tee = StreamCapture()
     tee(b"ok\n")
     tee(b"123456\xc3\xa9\n")  # the cap at 10 keeps b"123456\xc3"
@@ -324,9 +312,10 @@ def test_a_stream_that_ended_in_an_error_keeps_lines_a_lone_carriage_return_ends
 
 @pytest.mark.parametrize("content_encoding", ["rot13", "br", "gzip", "utf-8", "gzip, br"])
 def test_a_stream_that_cannot_be_decoded_is_recorded_empty_and_flagged(content_encoding):
-    """Never as its compressed bytes, which redaction cannot read. mitmproxy raises TypeError for
-    an encoding it does not know, which `get_content(strict=False)` does not catch, decodes
-    `utf-8` to a str, and has no decoder for two encodings stacked."""
+    """An undecodable stream is recorded empty and flagged, never as bytes redaction cannot read.
+
+    mitmproxy raises TypeError for an unknown encoding, decodes `utf-8` to a str, and cannot
+    decode two stacked encodings."""
     tee = StreamCapture()
     tee(b"not compressed at all\n")
     flow = streamed_flow((b"content-encoding", content_encoding.encode()))
@@ -361,9 +350,9 @@ def test_an_identity_encoded_stream_keeps_its_chunks():
 def test_a_compressed_stream_cut_short_is_recorded_as_whole_decoded_lines_or_empty(
     content_encoding,
 ):
-    """Decision 6's cut stream. `gzip` decodes what arrived, which is kept up to its last complete
-    line; `br` and `deflate` refuse a cut body and `zstd` decodes it to nothing, so it is recorded
-    empty. Never the compressed bytes, and never half a line."""
+    """A cut compressed stream is recorded as whole decoded lines, or empty; never compressed.
+
+    `gzip` decodes what arrived; `br` and `deflate` refuse a cut body and `zstd` yields nothing."""
     plain = b"".join(THREE_CHUNKS) * 200
     packed = encoding.encode(plain, content_encoding)
     tee = StreamCapture()

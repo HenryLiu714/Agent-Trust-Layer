@@ -18,18 +18,17 @@ from tests.support.engine import (
 from tests.support.maps import STRIPE_MAP, map_index
 from tests.support.upstreams import Answer, FakeStripe, serve, stripe_list
 
-# `/v1/refunds` answers a FULL page - this many real refunds, the same number a `limit` of that
-# size asks for - so a test can prove the minted refund pushes the oldest real one off the page
-# rather than making it longer than Stripe would.
+# `/v1/refunds` answers a full page of this many real refunds, so a test can show the minted
+# refund pushes the oldest real one off rather than making the page longer than Stripe would.
 REFUNDS_PAGE_SIZE = 2
 RATE_LIMITED = Answer(429, {"error": {"type": "invalid_request_error", "code": "rate_limit"}})
 
 
 def overlay_stripe() -> dict:
-    """A Stripe-shaped upstream with real state for every read the effects table models. A test
-    rate-limits every `GET /v1/refunds/{id}` with `stub.answers["/v1/refunds/"] = RATE_LIMITED`.
-    Anything else is Stripe's own 404 for an id it has never heard of, whose code is what tells a
-    minted object's read apart from a rate limit or a bad key on the same read."""
+    """Return a fake Stripe's state for every read the effects table models.
+
+    Anything else is Stripe's own 404 for an unknown id. A test rate-limits every
+    `GET /v1/refunds/{id}` with `stub.answers["/v1/refunds/"] = RATE_LIMITED`."""
     real = [
         {"id": f"re_REAL{n}", "object": "refund", "charge": "ch_REAL1"}
         for n in range(1, REFUNDS_PAGE_SIZE + 1)
@@ -67,8 +66,7 @@ def overlay_stripe() -> dict:
 
 @pytest.fixture
 def stripe_stub(tmp_path, monkeypatch):
-    """The stub on a free loopback port, and an engine over STRIPE_MAP with the real overlay,
-    built the way the CLI builds it. Yields (proxy port, stub port, recorded exchanges)."""
+    """Yield (proxy port, stub port, exchanges) for an engine over STRIPE_MAP with the overlay."""
     from irimi.decide.overlay import ServiceOverlay
 
     stub = serve(FakeStripe, threaded=True, **overlay_stripe())
@@ -101,9 +99,7 @@ def test_a_charge_reread_after_a_faked_refund_shows_the_refund(stripe_stub):
 
 
 def test_a_faked_refund_records_the_webhooks_it_would_have_fired(stripe_stub):
-    """Would-fire webhooks through the proxy, where the `Plan` and the response hook's `Exchange`
-    carry them: a faked refund lists `refund.created` and `charge.refunded`, and the read after it
-    lists nothing."""
+    """A faked refund records `refund.created` and `charge.refunded`; the read after it, nothing."""
     proxy, stub, seen = stripe_stub
     status, _ = via_proxy(
         proxy,
@@ -141,11 +137,10 @@ def test_the_refunds_list_shows_the_minted_refund_first(stripe_stub):
 
 
 def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_path, monkeypatch):
-    """A forged header racing a refund. `request()` snapshots the write log, empty here, so the
-    read is never rewritten; the refund then lands before the read's `response()`, which tests
-    the live log and overlays the page. An overlay that read the agent's forged `Irimi-Rewrote:
-    starting_after=...` off the recorded request would take the page for the one after a minted
-    refund and leave the refund off it."""
+    """A forged `Irimi-Rewrote` cannot hide a refund that lands while the read is in flight.
+
+    The read is not rewritten (the log is empty at `request()`), and the refund lands before
+    `response()`, which overlays the page from the live log."""
     from irimi.decide.overlay import ServiceOverlay
 
     # The refunds list is held at the upstream until the test lets it go, so a write can land
@@ -189,8 +184,7 @@ def test_a_forged_rewrote_header_cannot_hide_a_refund_that_lands_mid_read(tmp_pa
 
 
 def _keyed_refund(proxy, stub, key, amount=100):
-    """One refund through the proxy carrying `Idempotency-Key`, as stripe-python sends every POST.
-    Returns (status, response headers, body)."""
+    """Post one refund with `Idempotency-Key`; return (status, response headers, body)."""
     return read_via_proxy(
         proxy,
         f"http://127.0.0.1:{stub}/v1/refunds",
@@ -204,9 +198,9 @@ def _keyed_refund(proxy, stub, key, amount=100):
 
 
 def test_a_retry_with_the_same_key_is_one_refund_not_two(stripe_stub):
-    """A retry with the key it already sent gets the first answer's own bytes and never reaches
-    the write log. A second minted id would be logged as a second write, and the overlay would
-    apply one 100 refund as 200."""
+    """A retry with the same key gets the first answer's bytes and never reaches the write log.
+
+    Logged twice, the overlay would apply one 100 refund as 200."""
     proxy, stub, seen = stripe_stub
     status, first_headers, first = _keyed_refund(proxy, stub, "k-1")
     assert status == 200
@@ -230,8 +224,7 @@ def test_a_retry_with_the_same_key_is_one_refund_not_two(stripe_stub):
 
 
 def test_a_replayed_refund_records_no_webhooks(stripe_stub):
-    """The retry's events are already on the first write's own exchange; listing them again
-    would promise one refund's `refund.created` twice."""
+    """A retry records no webhooks; its events are already on the first write's exchange."""
     proxy, stub, seen = stripe_stub
     _keyed_refund(proxy, stub, "k-1")
     _keyed_refund(proxy, stub, "k-1")
@@ -241,8 +234,7 @@ def test_a_replayed_refund_records_no_webhooks(stripe_stub):
 
 
 def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
-    """A key reused for a different write is Stripe's own `idempotency_error`, and it is not a
-    write: the charge still shows the first refund only."""
+    """A key reused for a different write gets Stripe's `idempotency_error` and is not applied."""
     proxy, stub, seen = stripe_stub
     status, _, _ = _keyed_refund(proxy, stub, "k-2")
     assert status == 200
@@ -257,8 +249,7 @@ def test_the_same_key_with_a_different_amount_is_refused(stripe_stub):
 
 
 def test_a_reused_key_on_a_different_write_records_no_webhooks(stripe_stub):
-    """The real service would have refused the reused key, so nothing would have fired. A
-    conflict is not `precondition: rejected`, so it is pinned on its own."""
+    """An idempotency conflict would fire nothing, though it is not a rejected precondition."""
     proxy, stub, seen = stripe_stub
     _keyed_refund(proxy, stub, "k-2")
     _keyed_refund(proxy, stub, "k-2", amount=250)
@@ -276,8 +267,8 @@ def test_a_read_before_the_refund_is_untouched_and_unstamped(stripe_stub):
     assert ANSWERED_BY_HEADER not in headers
     assert seen[-1].answered_by == "live"
     assert seen[-1].overlay is None
-    # The same read after the refund IS overlaid, so the untouched one above was untouched
-    # because it came first, not because this engine has no overlay.
+    # The same read after the refund is overlaid, so the one above was untouched because it came
+    # first, not because this engine has no overlay.
     via_proxy(
         proxy,
         "POST",
@@ -304,9 +295,9 @@ def _fake_refund(proxy, stub, charge="ch_REAL1", amount=100):
 
 
 def test_a_full_refunds_page_drops_the_oldest_real_refund_and_says_there_is_more(stripe_stub):
-    """A page Stripe filled to the limit cannot also hold the minted refund. The page stays the
-    length the agent asked for and `has_more` becomes true, because a longer page is one no real
-    Stripe read could return."""
+    """A full page keeps its length with the minted refund on it, and `has_more` becomes true.
+
+    No real Stripe read returns a page longer than its limit."""
     proxy, stub, seen = stripe_stub
     refund_id = _fake_refund(proxy, stub)
     limit = REFUNDS_PAGE_SIZE
@@ -322,10 +313,10 @@ def test_a_full_refunds_page_drops_the_oldest_real_refund_and_says_there_is_more
 
 
 def test_a_cursor_naming_a_minted_refund_is_dropped_before_the_read_reaches_stripe(stripe_stub):
-    """Stripe has never heard of the refund irimi minted and would answer the page with an error,
-    so the cursor is dropped, and irimi keeps what it removed off the wire. The page that comes back
-    is the real list from its top, and the minted refund is NOT prepended again: it belongs on the
-    page before this one."""
+    """A cursor naming a minted refund is dropped off the wire, and the real list comes back.
+
+    Stripe would answer the unknown cursor with an error. The minted refund is not prepended
+    again: it belongs on the page before this one."""
     proxy, stub, seen = stripe_stub
     refund_id = _fake_refund(proxy, stub)
     stub.seen.clear()
@@ -389,10 +380,9 @@ def test_a_payment_intent_reread_after_a_faked_cancel_shows_it_canceled(stripe_s
 
 
 def test_a_reread_of_a_minted_refund_by_id_is_answered_not_404d(stripe_stub):
-    """A minted refund read back by id, end to end through the real proxy. Stripe 404s an id it
-    has never heard of; the agent stored that id because irimi told it the refund exists, and
-    irimi answers with the object it minted, at 200, stamped `overlay`. The read still reached
-    Stripe - that is what makes it a real read the summary counts."""
+    """A read of a minted refund by id is answered 200 with the minted object, stamped `overlay`.
+
+    Stripe 404s the unknown id; the read still reaches Stripe, so it counts as a real read."""
     proxy, stub, seen = stripe_stub
     # `_fake_refund` returns the minted id and asserts its own 200.
     minted = _fake_refund(proxy, stub)
@@ -413,8 +403,7 @@ def test_a_reread_of_a_minted_refund_by_id_is_answered_not_404d(stripe_stub):
 
 
 def test_a_read_of_a_refund_stripe_really_does_not_have_keeps_its_404(stripe_stub):
-    """The status moves for a minted object and for nothing else. An id neither Stripe nor irimi
-    has is Stripe's own 404, unstamped and unflagged."""
+    """An id neither Stripe nor irimi has keeps Stripe's own 404, unstamped and unflagged."""
     proxy, stub, seen = stripe_stub
     assert _fake_refund(proxy, stub).startswith("re_")
     status, headers, _ = read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/re_NOTHING")
@@ -426,9 +415,9 @@ def test_a_read_of_a_refund_stripe_really_does_not_have_keeps_its_404(stripe_stu
 
 
 def test_a_rate_limited_read_of_a_minted_refund_keeps_its_429(stripe_stub):
-    """Only Stripe's `resource_missing` is answered. A 429 on the same read is Stripe's answer
-    about the caller, which production would have sent for the real refund too, so the agent
-    gets it as sent and the exchange says the world irimi showed is incomplete."""
+    """A 429 on a read of a minted refund reaches the agent as sent, and the read is `partial`.
+
+    Only Stripe's `resource_missing` is answered; a 429 is about the caller."""
     proxy, stub, seen = stripe_stub
     minted = _fake_refund(proxy, stub)
     stub.answers["/v1/refunds/"] = RATE_LIMITED
@@ -441,8 +430,7 @@ def test_a_rate_limited_read_of_a_minted_refund_keeps_its_429(stripe_stub):
 
 
 def test_a_minted_refund_read_by_id_is_listed_under_its_refund(stripe_stub, tmp_path, monkeypatch):
-    """The summary line for a minted refund read by id, off a real run: the read hangs under the
-    refund as one that saw it, not as `did not show it  real (partial)`."""
+    """A read of a minted refund by id is listed under the refund as one that saw it."""
     proxy, stub, seen = stripe_stub
     minted = _fake_refund(proxy, stub)
     assert read_via_proxy(proxy, f"http://127.0.0.1:{stub}/v1/refunds/{minted}")[0] == 200

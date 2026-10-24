@@ -1,12 +1,6 @@
-"""A streamed answer over HTTP/2 on both sides of the proxy.
+"""A streamed answer over HTTP/2 on both sides of the proxy, recorded one DATA frame per chunk.
 
-`tests/engine/test_streaming.py` streams over HTTP/1.1, plain and TLS, and the sample corpus has no
-TLS at all. A real provider speaks HTTP/2 to a client that offers it, and mitmproxy offers the
-upstream what the client offered, so an agent on an HTTP/2 client gets an HTTP/2 upstream. The
-tee sits on mitmproxy's version-independent HTTP layer - one call per DATA frame - and this is
-the test that says so. Both ends are written with `h2`, the library mitmproxy's own HTTP/2 layer
-is built on, so the test needs nothing mitmproxy does not already install.
-"""
+Both ends use `h2`, which mitmproxy already installs."""
 
 import socket
 import ssl
@@ -23,9 +17,10 @@ from tests.support.maps import STREAM_MAP, map_index
 
 
 def _h2_stream_server(tls_leaf: Path, chunks, gates, alpn: list):
-    """An HTTPS upstream that speaks only HTTP/2 and answers one request with `chunks` as SSE,
-    one DATA frame each, holding each one after the first until `gates[i - 1]` is set. The ALPN
-    it agreed goes into `alpn`. The caller closes the returned listener."""
+    """Return an HTTP/2-only HTTPS upstream that streams `chunks` as SSE, one DATA frame each.
+
+    Each chunk after the first waits for `gates[i - 1]`. The agreed ALPN goes into `alpn`, and
+    the caller closes the returned listener."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(tls_leaf)
     ctx.set_alpn_protocols(["h2"])
@@ -57,9 +52,9 @@ def _h2_stream_server(tls_leaf: Path, chunks, gates, alpn: list):
 
 
 def _h2_through_the_proxy(cfg, proxy_port: int, upstream_port: int, gates):
-    """POST the chat route over HTTP/2 inside a CONNECT tunnel, trusting the irimi CA, and read
-    the answer, setting `gates[i]` once chunk `i` has arrived. The ALPN the proxy agreed, the
-    status and each non-empty DATA frame's bytes."""
+    """POST the chat route over HTTP/2 in a CONNECT tunnel; return ALPN, status and DATA frames.
+
+    It trusts irimi's CA and sets `gates[i]` once chunk `i` has arrived."""
     authority = f"127.0.0.1:{upstream_port}"
     sock = socket.create_connection(("127.0.0.1", proxy_port), timeout=5)
     sock.sendall(f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n".encode())
@@ -105,8 +100,7 @@ def _h2_through_the_proxy(cfg, proxy_port: int, upstream_port: int, gates):
 
 
 def test_a_stream_over_http2_on_both_sides_is_recorded_as_its_chunks(tmp_path, monkeypatch):
-    """Each chunk reaches the agent before the upstream sends the next, and the exchange holds
-    the whole stream and each chunk's length, as it does over HTTP/1.1."""
+    """Each chunk reaches the agent before the next is sent, and the exchange holds every chunk."""
     cfg = engine_config(tmp_path, monkeypatch, maps=map_index(tmp_path, monkeypatch, STREAM_MAP))
     gates = [threading.Event(), threading.Event()]
     upstream_alpn: list = []

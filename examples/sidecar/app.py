@@ -1,19 +1,10 @@
 """A refund agent as a long-lived HTTP server, beside `irimi serve` rather than launched by it.
 
-Each `POST /refund` with `{"charge": "ch_...", "reason": "..."}` is one run, `handle_refund`,
-marked `@sdk.trigger`, which:
-
-1. reads the charge from Stripe, a live read under irimi;
-2. refunds it, a write irimi fakes;
-3. records the refund in the agent's own SQLite through `db.mark_refunded`, an `@sdk.write_tool`,
-   once Stripe has accepted it; under irimi only its fake runs;
-4. answers `200 {"refund": "re_..."}`.
-
-`GET /healthz` answers `200`. Two requests at once are two runs, each on its own thread, and
-neither sees the other's calls.
-
-Stripe is called with stdlib `urllib.request`, which takes `HTTPS_PROXY` and `SSL_CERT_FILE` from
-the environment, so the app goes through irimi with no code of its own.
+Each `POST /refund` with `{"charge": "ch_...", "reason": "..."}` is one run of `handle_refund`: it
+reads the charge, refunds it, records the refund through `db.mark_refunded` once Stripe has
+accepted it, and answers `200 {"refund": "re_..."}`. `GET /healthz` answers `200`. Concurrent
+requests are separate runs. Stripe is called with stdlib `urllib`, which takes `HTTPS_PROXY` and
+`SSL_CERT_FILE` from the environment, so the app reaches irimi with no code of its own.
 
     PORT=8080 STRIPE_API_KEY=sk_test_... python -m examples.sidecar.app
 
@@ -38,8 +29,10 @@ TEST_KEY_PREFIX = "sk_test_"
 
 
 def stripe(method: str, path: str, form: dict[str, str] | None = None) -> dict[str, Any]:
-    """One Stripe API call, its JSON answer. Refuses, before sending anything, a key that is not
-    test mode. An error status raises `urllib.error.HTTPError`."""
+    """Make one Stripe API call and return its JSON answer.
+
+    A key that is not test mode is refused before anything is sent. An error status raises
+    `urllib.error.HTTPError`."""
     key = os.environ.get("STRIPE_API_KEY", "")
     if not key.startswith(TEST_KEY_PREFIX):
         raise ValueError(f"STRIPE_API_KEY must be a test-mode key ({TEST_KEY_PREFIX}...)")
@@ -58,7 +51,7 @@ def mark_refunded_fake(charge: str, refund: str) -> dict[str, Any]:
 
 @sdk.write_tool(fake=mark_refunded_fake, name="db.mark_refunded")
 def mark_refunded(charge: str, refund: str) -> dict[str, Any]:
-    """The agent's own record of the refund. Under irimi the fake runs instead."""
+    """Record the refund in the agent's database. Under irimi the fake runs instead."""
     path = os.environ.get("REFUND_DB", "refunds.sqlite3")
     with contextlib.closing(sqlite3.connect(path)) as conn, conn:
         conn.execute(
@@ -72,8 +65,9 @@ def mark_refunded(charge: str, refund: str) -> dict[str, Any]:
 
 @sdk.trigger
 def handle_refund(charge: str, reason: str) -> str:
-    """Refund `charge` in full, record it, and return the refund's id. `reason` is the caller's,
-    kept as the run's trigger argument."""
+    """Refund `charge` in full, record it, and return the refund's id.
+
+    `reason` is the caller's, kept as the run's trigger argument."""
     stripe("GET", f"/v1/charges/{urllib.parse.quote(charge, safe='')}")
     refund = str(stripe("POST", "/v1/refunds", {"charge": charge})["id"])
     mark_refunded(charge, refund)

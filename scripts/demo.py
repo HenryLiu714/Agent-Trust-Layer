@@ -77,8 +77,7 @@ def _quickstart(world: World, workdir: Path) -> dict[str, str]:
 
 
 def _decide(call: LlmCall) -> LlmTurn:
-    """The model, as `examples/replay/prompt*.txt` ask: the charge's whole remaining amount, or
-    half of it when the prompt says half."""
+    """Answer as `examples/replay/prompt*.txt` ask: refund what is left, or half when told."""
     facts = json.loads(call.last_user_text())
     left = facts["charge"]["amount"] - facts["charge"]["amount_refunded"]
     amount = left // 2 if "half" in call.system else left
@@ -115,8 +114,9 @@ EXAMPLES = {
 
 
 def run(name: str, workdir: Path) -> tuple[int, FakeInternet]:
-    """`irimi shadow -- <example>` in this process, against a fake internet seeded for it. Returns
-    irimi's exit code and the fake internet, whose `writes()` must be empty afterwards."""
+    """Run `irimi shadow -- <example>` in this process against a fake internet seeded for it.
+
+    Returns irimi's exit code and the fake internet, whose `writes()` must be empty afterwards."""
     example = EXAMPLES[name]
     world = World()
     home = workdir / "home"
@@ -151,7 +151,7 @@ def run(name: str, workdir: Path) -> tuple[int, FakeInternet]:
 
 
 def _workflow(workdir: Path) -> int:
-    """The corpus's own start-here scenario, under `irimi shadow` only."""
+    """Run the corpus's own start-here scenario, under `irimi shadow` only."""
     name, scenario = WORKFLOW
     result = execute.run(workflows()[name], scenario, "shadow", workdir)
     print("\n".join(result.irimi))

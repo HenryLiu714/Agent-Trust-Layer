@@ -1,17 +1,9 @@
 """An LLM refund agent: record a run, edit the prompt, replay it, and see which write changed.
 
-`handle_ticket`, marked `@sdk.trigger`, decides what to refund for a support ticket:
-
-1. `lookup_customer`, an `@sdk.read_tool` over the agent's own SQLite, which the proxy cannot see;
-2. a live read of the charge from Stripe;
-3. one call to Claude, with the system prompt read from `PROMPT_FILE`, for a refund amount and a
-   reply;
-4. a refund of that amount, when it is above zero, which irimi fakes;
-5. `record_decision`, an `@sdk.write_tool` over the same SQLite, whose fake runs under irimi.
-
-So the prompt decides the refund. Both SDKs go through irimi by the environment it sets: the
-anthropic client reads `HTTPS_PROXY` and `SSL_CERT_FILE`, and `connect()` hands them to
-stripe-python.
+`handle_ticket` looks the customer up in the agent's own SQLite (`db.lookup_customer`), reads the
+charge from Stripe, asks Claude for a refund amount, refunds it, and records the decision
+(`db.record_decision`), so the prompt decides the refund. Both SDKs reach irimi through the
+environment it sets; `connect()` hands `HTTPS_PROXY` and `SSL_CERT_FILE` to stripe-python.
 
     python -m examples.replay.seed CHARGE CUSTOMER_NAME
     irimi shadow -- python -m examples.replay.agent TICKET_ID CHARGE MESSAGE
@@ -95,8 +87,8 @@ def ask_model(system: str, content: str) -> dict[str, Any]:
             "effort": "low",
             "format": {"type": "json_schema", "schema": DECISION_SCHEMA},
         },
-        # irimi does not yet label this client's requests (it sends through httpx2) with their
-        # run by itself, so the call names its run. irimi takes the header off before forwarding.
+        # irimi cannot label this client's requests with their run (it sends through httpx2), so
+        # the call names its run. irimi takes the header off before forwarding.
         extra_headers={"Irimi-Run": run_id} if run_id else None,
     )
     if message.stop_reason in ("refusal", "max_tokens"):
@@ -117,8 +109,9 @@ def ask_model(system: str, content: str) -> dict[str, Any]:
 
 @sdk.read_tool(name="db.lookup_customer")
 def lookup_customer(charge: str) -> dict[str, Any]:
-    """The customer the agent's database holds for `charge`. Opened read-only, so a missing
-    database raises rather than being created empty."""
+    """Look up the customer the agent's database holds for `charge`.
+
+    The database opens read-only, so a missing one raises rather than being created empty."""
     uri = f"file:{urllib.parse.quote(db_path())}?mode=ro"
     with contextlib.closing(sqlite3.connect(uri, uri=True)) as conn:
         row = conn.execute("SELECT name FROM customers WHERE charge = ?", (charge,)).fetchone()
@@ -131,7 +124,7 @@ def record_decision_fake(ticket_id: str, decision: dict[str, Any]) -> dict[str, 
 
 @sdk.write_tool(fake=record_decision_fake, name="db.record_decision")
 def record_decision(ticket_id: str, decision: dict[str, Any]) -> dict[str, Any]:
-    """The agent's own record of what it decided. Under irimi the fake runs instead."""
+    """Record what the agent decided. Under irimi the fake runs instead."""
     with contextlib.closing(sqlite3.connect(db_path())) as conn, conn:
         conn.execute(
             "INSERT INTO decisions (ticket_id, refund_amount, reply) VALUES (?, ?, ?)",

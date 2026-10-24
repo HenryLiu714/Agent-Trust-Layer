@@ -36,7 +36,7 @@ def connect(env: Mapping[str, str]) -> None:
 
 
 def pick_charge(charges: Iterable[Any]) -> Any:
-    """The first paid charge with any amount left to refund, or None."""
+    """Return the first paid charge with any amount left to refund, or None."""
     for charge in charges:
         if charge.status == "succeeded" and charge.paid and charge.amount > charge.amount_refunded:
             return charge

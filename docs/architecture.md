@@ -1,241 +1,169 @@
 # Architecture
 
-irimi is a local MITM proxy that sits between an agent and the services it talks to. Reads are
-forwarded to the real service, writes are answered locally, and (from Phase 2) reads after writes
-see those writes. This document is the map of the code: what each module is for, how a request
-moves through them, and which rules the tests hold the layout to.
+For contributors changing irimi's code. It maps the packages, follows a request through them,
+says which thread runs what, and names the interfaces a test or another mode substitutes. The terms
+are defined in [concepts.md](concepts.md), and the rules every change must keep are in
+[security.md](security.md#invariants); this page refers to them by name. Each module's own
+docstring says what it holds and guarantees.
 
-## One request, end to end
+## A request through the code
 
-Everything happens inside `IrimiAddon` (`src/irimi/engine/mitm.py`), which mitmproxy calls once
-per flow. Each hook calls plain functions from the layers below it, in this order. Nothing
-through the listener skips them: mitmproxy's raw TCP relay is off (`rawtcp=False`), so a tunnel
-whose first bytes mitmproxy would not call HTTP (a method like `M-SEARCH`, or a first segment of
-under three bytes) is parsed as HTTP and decided like any request, bytes that are not HTTP fail
-there, and a connection a live `101` upgraded to anything but a WebSocket is closed. None of them
-is relayed, and none leaves a record (#75).
+mitmproxy calls `IrimiAddon` (`engine/mitm.py`) once per flow. The addon only converts flows into
+irimi's `Request` and `Response` and carries plans onto them. What irimi decides and records is
+`engine.session.ShadowSession`'s, which knows nothing of mitmproxy.
 
-1. **`request`** - `pipeline.parse` normalises the wire request. `reverse_door.detect_door`
-   decides whether it is addressed to the listener itself. If it is, and its path starts with
-   `/_irimi/`, it is the control endpoint (#73): `control.ControlEndpoint` answers it in the hook
-   and the hook returns, so it is never forwarded, decided or recorded as an exchange. Otherwise a
-   request on the listener came in as `/<host>/<path>`, and
-   `reverse_door.rewrite_reverse` points it upstream. Any `Irimi-Rewrote` the agent itself sent
-   is stripped here, off the flow and off the recorded request: that header is irimi's own
-   vocabulary, and the response side believes it (#53). `pipeline.attribute_run` picks the run id
-   from `Irimi-Run`, which is then stripped the same way, so it never leaves irimi (#67). Then
-   `pipeline.classify` says what it is (`read`, `write`, `llm`, `telemetry`, `unknown`). A read
-   the overlay can translate (a cursor naming a minted id, #43) is translated now, unless it is
-   delegated, and is what the policy is asked and what the trace records, whoever answers it
-   (#82); only a live forward carries the translation onto the flow. Then
-   the `AnswerPolicy` decides: forward live, delegate to an answer target (`delegation.delegate`
-   chose it; `_to_target` rewrites the flow), or answer it locally (`echo`: the route's L1
-   fixture when its map names one, the L0 echo otherwise). The decision is stored on the flow
-   as `_Pending`. **Nothing in this hook may raise**: an exception
-   here makes mitmproxy forward the flow untouched, so the whole decision is wrapped and fails
-   closed with a `502` flagged `decision-failed`, and so does turning the answer into mitmproxy's,
-   since a replay's answer was read off disk (#82); the precondition reads that answer made are
-   still recorded.
-2. **`responseheaders`** - stamps `Irimi-Answered-By` on a live or delegated answer before the
-   headers go out, and streams a `text/event-stream` answer through a `_StreamTee`, which hands
-   each chunk on unchanged and keeps a copy for the trace (#71).
-3. **`response`** - every unstreamed read's body goes past `echo.observe_read` first, which is
-   how a service learns the real values its fakes have to sort against (Slack's `ts`); a service
-   with no observer is a no-op. Then, for a live, unstreamed read, the `Overlay` gets a chance to
-   rewrite the body from the write log. `pipeline.annotate` builds the `Exchange`, writes join
-   the write log, `pipeline.respond` stamps the header, and `_finish` hands it to the
-   `TraceStore` - which keeps a telemetry exchange only as a count (#70) - and reports it to the
-   CLI.
-4. **`error`** - a lost upstream or an unreachable target is annotated with the right flag and
-   recorded with no response, so a failed write is never silently dropped from the trace. A
-   stream that fails after its headers went out keeps the complete lines its `_StreamTee` copied,
-   flagged `stream-truncated` (#71).
+1. **`request` hook.** `wire.parse` normalises the request. `ingress.admit` says what it is to
+   irimi: a `ControlCall` (a request to the listener itself under `/_irimi/`, answered by
+   `control.ControlEndpoint` in the hook), an `Admitted` request with its run id read from
+   `Irimi-Run` and irimi's headers removed (a base-URL request is rewritten to its upstream here),
+   or a `Refusal`, answered by `ShadowSession.refuse` with irimi's own `400` or `403`.
+2. **`ShadowSession.plan`**, on a worker thread (`asyncio.to_thread`), builds a `Plan`:
+   `classify.classify` gives the kind; `targets.resolve` finds the target once; a read the
+   overlay can translate (a cursor naming a minted id) is translated; the `AnswerPolicy` returns a
+   `Decision`: `Forward`, `Delegate` or `Respond`. The policy runs the precondition check
+   (`decide/preconditions.py`), whose check read is carried on the plan. A `Respond` is stamped
+   `Irimi-Answered-By` as it is planned, and a target is probed and, if unreachable, refused here.
+3. **Back in the hook**, the addon carries the plan onto the flow: a `Respond` becomes the flow's
+   response, a `Delegate` points the flow at its target with credential headers removed, and a
+   `Forward` goes upstream. The whole hook runs under one guard: if anything raises, the flow gets
+   irimi's `502` flagged `decision-failed` instead (the fail-closed hook rule).
+4. **`responseheaders` hook.** Stamps a target's answer before its headers go out (a live answer
+   carries none), and tees a `text/event-stream` answer through a `StreamCapture`, which passes each
+   chunk on unchanged and keeps a copy for the trace.
+5. **`response` hook.** `ShadowSession.complete` lets the service observe a live read
+   (`services.observe_read`: Slack learns the newest `ts`), applies the run's faked writes to an
+   unstreamed live read through the `Overlay`, builds the `Exchange`, and adds a faked write to its
+   run's write log. `ShadowSession.record` hands the exchange to the `RunStore` and then to the
+   CLI's callback.
+6. **`error` hook.** `ShadowSession.fail` records a lost connection or unreachable target with no
+   response, flagged, so a failed write is never missing from the trace.
 
-Every body a hook records is decoded by `_decoded`, which never raises and never decodes past
-`MAX_DECODED_BODY` (#94): each codec runs incrementally and stops at the cap, so a small
-compressed bomb costs a hook at most twice the cap in memory. A body cut there is never decoded or
-redacted whole, so it is recorded empty and flagged, as the store records any body past the same
-bound; a stream keeps its first `store.MAX_STORED_BODY` bytes of whole lines, as any stream that
-is not whole does. Such a read is never overlaid, so the agent gets the service's bytes unchanged,
-and one the run has a write for is `overlay: partial`, as a body the overlay cannot parse is.
-Nothing is answered from the start of a body: a write whose request body was cut fails closed
-like a decision that raised (`502`, `decision-failed`, `body-truncated`), a live kind is forwarded
-with the agent's own bytes, and the control endpoint refuses a cut body `413`.
+Every body a hook records is decoded by `engine.decoding.decode_body`, which never raises and stops
+at `limits.MAX_DECODED_BODY`, so a small compressed bomb cannot exhaust memory. Raw TCP relay is
+off: bytes that are not HTTP fail as HTTP, and are never relayed.
+
+## Modes
+
+The command is the mode; no config file chooses it. `cli/compose.py` is the composition root:
+`prepare_run` loads the maps, the CA and the redaction key, opens the store and builds the write log
+and idempotency store, and `build_engine` wires a `MitmEngine` with its policy and control
+endpoint.
+
+| | `irimi shadow -- cmd` | `irimi serve` | `irimi replay RUN` |
+| --- | --- | --- | --- |
+| `EngineConfig.mode` | `Shadow()` | `Serve()` | `Replay(source_run_id)` |
+| engine's own run | the process run, given to the child as `IRIMI_RUN` | `unattributed` | the replay's run |
+| policy | `ShadowPolicy` | `ShadowPolicy` | `ReplayPolicy`, falling back to a `ShadowPolicy` that reads the recording |
+| child | the command | none | the command, or `python -m irimi.replay.child` |
+| prints | stream, then one summary | stream, then a summary per SDK run as it ends | stream, then the replay report |
+
+When the store reports a run ended, the composition root drops that run's write log and
+idempotency entries, then (under serve) prints its summary. A run is never visible to another.
+
+## Threads
+
+| Thread | Runs | May not |
+| --- | --- | --- |
+| main | the CLI: parsing, the banner, starting and waiting for the child, signals, the summary | touch a flow |
+| engine | mitmproxy's asyncio loop: every hook, the control endpoint, `ShadowSession.record` | block: no network or disk I/O |
+| workers | `ShadowSession.plan` via `asyncio.to_thread`: the policy, irimi's check read, target probes | touch a flow or the store directly; the plan is carried back to the loop |
+| store writer | `DirectoryStore`'s queue: redaction, then every file write | raise into a caller |
+
+`runner.start_engine` runs the engine on its own thread and waits for its listener. Exchanges are
+recorded on the engine thread, check reads included, so the store's queue has one producer per
+engine; the SDK's posts reach the store through the control endpoint, on the same thread.
 
 ## Layers
 
-Every module lives in exactly one layer and may import only from layers above it in this table
-(lower layers never import higher ones). `tests/test_import_boundary.py` enforces this, and also
-that `mitmproxy` is imported in `engine/mitm.py` and nowhere else. Add a module and the test asks
-you to place it.
+The code is packaged by concept, and the packages sit in layers. A module may import any module of
+a lower-numbered layer, and a module listed before it in its own package, and nothing else.
+`tests/safety/test_import_boundary.py` holds the code to this table, with each package's module
+order, and holds this table to its own. It also holds that `mitmproxy` is imported in
+`engine/mitm.py` and nowhere else. A package nested in another (`services/stripe/`,
+`record/store/`) is one entry of its parent. A new module goes in both places.
 
-| Layer | Modules | Responsibility |
+| Layer | Packages | Modules, lowest first | Job |
+| --- | --- | --- | --- |
+| 0 | `core/` | `exchange`, `netaddr`, `secret_shapes`, `money`, `limits`, `opener`, `exitcodes`, `calls`, `bodies` | The vocabulary every package speaks: requests, responses and exchanges with their kinds, flags and write-set predicates; `netaddr`, the one loopback rule; credential shapes; size bounds; exit codes; the never-raising body parser. |
+| 1 | `protocol/` | `headers`, `env`, `trace`, `entrypoints`, `control`, `replay_files` | What crosses a process boundary or reaches disk: irimi's headers, the child's environment, the trace format's records and codecs, `module:qualname` entrypoints, the control endpoint's routes and bodies, the replay child's files. The engine and the SDK both import it and never each other. |
+| 2 | `config/`, `sdk/` | `paths`, `files`, `ca`; `sdk/`'s private modules | Side by side: `config` is irimi's state on this machine (paths, owner-only files, the CA); `sdk` is what an agent imports, its surface `irimi.sdk.__all__`, its imports held by `tests/sdk/test_surface.py`. |
+| 3 | `servicemaps/` | `model`, `rules`, `loader`, `__init__`, `classify` | The service maps as code: dataclasses and matching, load-time rules (the scope rule), the loader, and classification. |
+| 4 | `services/` | `model`, `generic`, `stripe/`, `slack/`, `__init__` | What irimi knows about each service: one `Service` spec each in `REGISTRY`, the generic echo and fixture answers, each service's answers, effects and checks. |
+| 5 | `record/` | `redact`, `store/` | What a run leaves on disk: the redacted copy of each event, and the store that writes and reads it. |
+| 6 | `decide/` | `targets`, `reader`, `writelog`, `idempotency`, `preconditions`, `overlay`, `policy` | How irimi answers: targets, irimi's check read, each run's write log, retries, the precondition check, the overlay and the policy. |
+| 7 | `engine/` | `__init__`, `wire`, `ingress`, `decoding`, `capture`, `control`, `session`, `mitm` | The proxy: the `Engine` protocol, stamping, admission, bounded decoding, stream capture, the control endpoint, `ShadowSession`, and `MitmEngine`. |
+| 8 | `report/` | `terminal`, `model`, `summary`, `runs`, `maps` | Everything a run prints, as pure functions: banner and stream lines, the summary model and its rendering, the stored-run listings, `irimi maps list`. |
+| 9 | `replay/` | `child`, `index`, `policy`, `compare`, `plan`, `report` | Re-running a stored run and judging it: the child that calls a trigger, the recording a replay answers from, the replay policy, run comparison, the replay plan and its report. |
+| 10 | `cli/` | `options`, `runner`, `compose`, `init`, `maps`, `runs`, `shadow`, `serve`, `replay_cmd` | The `irimi` command: shared options, process plumbing, the composition root, and one module per command. |
+| 11 | `__main__`, `testing` | | The entry points: `python -m irimi`, and `irimi.testing`, which starts the proxy and so needs the full install. |
+
+`src/irimi/maps/*.yaml` are the shipped service maps and `src/irimi/fixtures/*.json` the objects
+their `fixture:` keys name. Both are data, and `tests/test_servicemap.py` pins that they are in a
+built wheel. Where a service's knowledge lives is in [adding-a-service.md](adding-a-service.md).
+
+`netaddr` is shared by every rule that asks "is this address this machine?": admission (is a
+request addressed to the listener?), the target rules (loopback only, never irimi itself) and the
+credential-path rule. Changing it changes all of them.
+
+## Seams
+
+The interfaces a test or another mode substitutes. Each is a `Protocol`.
+
+| Seam | What it does | Implementations |
 | --- | --- | --- |
-| 0 | `exchange` | The wire vocabulary: `Request`, `Response`, `Exchange`, the kinds, the `answered_by` values and every flag, and `is_authored_write`, the one statement of which writes enter the engine's write log - the summary files an overlaid read by the same rule (#48). It also carries `currency`, the code the write's L3 precondition read found on the object it names, which is the only thing besides the request that may denominate an amount in the summary (#60). It also holds the helpers every layer reads a message with: `header_value` / `Request.header`, `without_header`, `Request.path_and_query`, `media_type`, and `RUN_HEADER`, the `Irimi-Run` header's name, which `pipeline` reads and the SDK sets (#74, #75). An exchange's `started_at` and `ended_at` are wall-clock seconds, read by the engine: the request hook's first parse to the hook that finishes the flow, or an engine-issued read's `Reader` call, and never ending before they start (#68). A streamed response's `stream_chunks` split its recorded body into the chunks the agent was sent, and `clip_chunks` cuts them where a body is cut (#71). |
-| 0 | `paths` | Where irimi keeps state (`$IRIMI_HOME`, default `~/.irimi`) and the listener defaults. Also the names of the variables `irimi shadow` gives its child that the SDK reads (`ENGINE_ACTIVE_ENV`, `RUN_ENV`, `CONTROL_ENV`, and in a replay `REPLAY_RUN_ENV`, #83, and the three a replay's child calls a trigger by, `REPLAY_CALL_ENV`, `REPLAY_ARGS_FILE_ENV` and `REPLAY_OUTCOME_FILE_ENV`, #84), here in layer 0 so the SDK can import them (#73), and `AGENT_VERSION_ENV`, which the process run and every SDK run record (#74). |
-| 0 | `netaddr` | The one place that answers "is this address this machine?". Three safety rules depend on it agreeing with itself. A listener bound wider than loopback is also the address a connection reached it at, which `resolves_to_self` takes as `local_address` (#77). `authority` spells `host:port` with an IPv6 literal bracketed. |
-| 0 | `secret_shapes` | The credential shapes redaction looks for in text (`SECRET_PATTERNS`, compiled once as `SECRET_SHAPE`, #69), and `cut_outside_secrets`, the one cut made before redaction: at its limit, or where a shape that runs across it starts, so what it keeps, redacted, is a prefix of the whole redacted (#179). The SDK cuts a trigger's name, a captured `repr` and an exception's message and type with it, and the store an end's error while it waits; `redact` and they read one pattern. Pure. |
-| 1 | `ca` | Generate the local CA and write the bundle mitmproxy mints leaf certificates from. |
-| 1 | `fixture` | The vendored response objects an L1 answer starts from. Reads `irimi/fixtures/<service>.json`, caches it, and never raises. |
-| 1 | `servicemap/` | The service maps. `model` is the dataclasses, the host index, route matching and the target precedence; `rules` is the validation (THE SCOPE RULE lives here); `loader` turns YAML, the overrides file and the `--target` flags into a `MapIndex`. |
-| 1 | `bodies` | The one never-raising parser for a request's fields (`reflect`, Stripe's bracketed form encoding included) and a response's JSON object (`json_object`, capped at `MAX_BODY_BYTES`). Also `SERVICE_OWNED`, the object fields a posted value never overwrites, which the faker and the Stripe effects share. |
-| 1 | `trace` | Trace format v2 (#68, #82): the records a stored run is made of - `RunRecord`, `Trigger`, `ErrorInfo`, `ToolCall`, `TelemetrySeen`, `BodyRef` - and pure JSON codecs for them and for `Exchange`, with no I/O. Bodies never go inline: the exchange codec hands them to the caller's `put_body` / `get_body`. A decoder raises only `TraceFormatError` (whatever the caller's `get_body` raises aside), refuses a newer `SCHEMA_VERSION` and ignores fields it does not know; `docs/trace-format.md` says what a later field or vocabulary value costs. Also `mode_for`, the one rule for a run's mode: `replay` when the engine answers from a stored run, `shadow` otherwise (#82). Also `is_valid_run_id`, the path-traversal guard a run id passes before it may name a run - and so a directory. Also what a replay never hands back as a tool's outcome, which the recording and the SDK both read (#83): `holds_description`, a captured value holding `REPR_KEY` or `TRUNCATED_KEY`, and `STOPPED_ERROR_TYPES`, what a call stopped from outside records; and `RecordedOutcome`, with its codec and `RECORDED_LOOKUP_FIELDS`, what the control endpoint's lookup takes and answers. `docs/trace-format.md` is the reference, and its example is decoded by the tests. |
-| 2 | `pipeline` | The pure request pipeline: parse, classify, attribute the run, annotate, respond. An `Irimi-Run` value `trace.is_valid_run_id` refuses is treated as absent (#68). |
-| 2 | `reverse_door` | The `/<host>/<path>` door for SDKs that ignore proxy variables. `detect_door` takes the address the connection arrived on, so a request naming that address, or a name resolving to it, is the listener's own whatever it is bound to (#77). |
-| 2 | `redact` | Redaction before anything reaches disk (#69). `redact_exchange` returns the copy of an exchange the trace store writes, and `redact_json` the copy of a trigger's or tool call's JSON; neither raises, and a part that cannot be redacted is stored as `<redaction-failed>` and flagged `redaction-failed`. A secret becomes `placeholder(key, value)`, an HMAC under this install's `load_key` key, so one secret is always one placeholder; the shapes it finds in text are `secret_shapes.SECRET_SHAPE`'s (#179). It is also the one statement of which headers are credentials (`is_credential_header`), which `delegation` strips from a target's request by the same rule, and of where a line ends (`complete_lines`), to which the engine trims a stream that is not whole so that redaction can read every line of it (#71). `docs/trace-format.md`, "Redaction", lists every rule. |
-| 2 | `sdk/` | The SDK an agent imports (#74), beside `pipeline` rather than above the engine because it runs in the agent's process, not irimi's. `api` is `@sdk.trigger` and `sdk.run()`; `context` is the run's id in a context variable (`current_run_id`, `propagate`); `runs.RunScope` is the one lifecycle both share - join a current run, or, in a replay's child, adopt the replay's run and post nothing (#84), or capture the trigger, mint an id, post the start, run, post the end, reset. A trigger makes a fresh `RunScope` per call; one `sdk.run` object may be entered again, so it keeps one scope per entry, per context; `capture` turns a trigger's arguments into JSON and says whether they are replayable (the table in `docs/trace-format.md`), and `revive` turns that JSON back into values, or says `NotReplayable` (#83); `client.ControlClient` posts to `IRIMI_CONTROL` over stdlib urllib, never through the proxy, and never raises, logging one warning per kind of failure; `instrumentation.instrument` patches `http.client.HTTPConnection.putrequest` and, when httpx is installed, httpx's two transports, once per process on the first run, so a run's request carries `Irimi-Run` only when its connection goes to irimi's listener (the host and port `IRIMI_CONTROL` or a proxy variable names), and never the SDK's own posts (`unlabelled`) (#75); `tools.tool` is `@sdk.tool`, a read or write the proxy cannot see: an active write runs only the stand-in it names, every active call is posted as a `ToolCall` to its run (the current one, else `IRIMI_RUN`, else `unattributed`), mistakes are TypeErrors at decoration (THE SCOPE RULE's shape), and `_chosen` is the one dispatch (#76). In a replay (`context.replay_run_id`, from `IRIMI_REPLAY_RUN`) a read tool first asks the control endpoint for its recorded outcome (`_replay_answer`, `ControlClient.recorded`, a `trace.RecordedOutcome`; off the event loop for an `async def`, and only then), and a hit runs nothing: the result is revived, or the recorded error raised as `errors.RecordedToolError`, a subclass of the builtin it names when it names one, and the call is recorded `ran: recording`; a miss, a failed lookup or a result that does not revive runs the real function. A write runs its stand-in in a replay too. `errors.error_info` is what a run or a tool call records an exception as, so a recorded error is recorded as the recorded type (#83). `context.replay_run_id` trusts `IRIMI_REPLAY_RUN` only when it names the child's `IRIMI_RUN` too, as irimi sets both, so a stale export in a serve agent's environment adopts nothing (#84). `api.resolve` is `api.entrypoint`'s inverse, the function a `module:qualname` names, imported, a plain method refused, since a run records no instance; `capture.call_arguments` undoes `capture_call`'s binding; `replay_child` is the child `irimi replay` starts to call a trigger with its revived args, which says how the call ended in a `CallOutcome` file and exits `CANNOT_CALL` for a call it could not make; `replays` is `sdk.replay()`, `irimi replay` run by its one seam, `_run_irimi` (a subprocess, unless a harness swaps it), with the args in a file, and `ReplayResult`, whose JSON is the one `--result-file` writes (#84). Inert while `IRIMI_ENGINE_ACTIVE` is not `1` (`context.active`). Imports only the stdlib, `exchange` (the control endpoint's route names), `paths`, `trace` and the package's `__version__`, never mitmproxy, so it can later ship on its own. |
-| 3 | `delegation` | Answer targets (design D20): which target answers a request, where it is sent, what it may never be, which headers it may not carry (`redact.is_credential_header`, re-exported: the rule disk shares, #69). |
-| 3 | `echo/` | The body a locally answered write gets, as a package that mirrors `services/`. `__init__` is the dispatch and the serialization: `ENVELOPED`, `SHAPES`, `LITERAL_BODIES` and `READ_OBSERVERS` are tables keyed on the classified service, so a service with a write-side shape of its own is an entry and not a branch. `generic` is the L0 echo and the L1 fixture body, for any service (#41); `slack` is Slack's envelopes and its `ts` sequence (#42). L0: form and JSON reflection (read with `bodies.reflect`), minted ids, Slack's envelope. L1: the route's fixture with the request's own fields written over it (`reflect_over`). A Slack envelope (`slack.SlackEnvelope`) may name a field `optional:`, which the fixture holds as `null` only so a posted value can land on it and which is dropped again when the caller posted none - real Slack sends no `message.thread_ts` for a top-level post, and Stripe really does send `reason: null`, so the rule is the envelope's and not the reflection's (#55). `fake_rejection` carries an L3 rejection's modeled error body at the level the route's write would have been answered at - there is no `fake-L3` (#45). Also `observe_read`, the one seam where a forwarded read's body teaches the faker something (a Slack `ts` a minted one must sort after). |
-| 3 | `services/` | What a faked write does to a later live read, per service, as plain functions over plain data (#43). `model` is the `Read` / `Write` / `Applied` / `Rewritten` vocabulary; `stripe` and `slack` are the effects tables (#44). An effect may also answer a read outright, status and all (`Applied.status`), for the one case where the service could not have answered it: a read of an object THIS RUN minted, which it refuses because it has never heard of the id (#52). Also the L3 preconditions (#45): `Proposal` / `Probe` / `Rejection` / `NotEvaluable` / `Check` in `model`, and `PRECONDITIONS`, the table a route's `precondition:` key names an entry in - each check says which one real read it needs and what the answer, with the run's writes applied, makes of the write. A check may also name the one non-verdict fact its read carries: `Check.currency`, the code the document denominates amounts in, which is service knowledge and not a key the policy may guess at (#60). A verdict has three answers, not two: rejected, passed, and `NOT_EVALUABLE` for a document it cannot read, which is why a Slack `missing_scope` at HTTP 200 never prints as a check that passed. Pure: no clock, no minting, no I/O, so a replay runs the same functions over a recording (#82). Also `Idempotency` and the `IDEMPOTENCY` table (#46): the header a service keys a repeat on, and what it answers when that key comes back with different parameters. Slack has no entry, because it has no such mechanism. And `scope_of`, the headers that scope a service's state. |
-| 4 | `writelog` | The run's faked writes, decoded out of the trace into `services.Write`s, in the scope a read is asking about. `scoped_writes` / `read_of` are the one path from the write log to an effect, shared by the overlay, which applies them to a live read, and the policy's L3 read, which checks a new write against them (#45). Pure. |
-| 4 | `idempotency` | The run's answers to writes that carried an idempotency key, so an agent's retry with the same key is one write and not two (#46). A key held with different parameters is the service's own `idempotency_error`, and "the same write" is compared as the whole request - method, path, query and the posted fields the route does not call `volatile:` - because a key names one write and not one route, and `payment_intents.cancel` posts nothing at all. In memory, lock-guarded because the decision runs on a worker thread, and pure enough for a replay to keep the same promise over a recording (#82). `Stored` carries the first answer's `currency` too, so a replayed write's exchange and the first one's agree about what that single write was denominated in (#60). |
-| 4 | `reader` | `Reader`, `NoReader`, `UpstreamReader`: the one real read L3 issues, and shadow mode's reader over stdlib urllib (#45), which names no proxy and follows no redirect, as mitmproxy's own forwarding does: it dials the host the classifier saw, and a 3xx is the answer, which the policy takes as `not_evaluable` (#85). `answered_as` is what a reader's reads are recorded as: its own `answered_by` and `flags` when it names them, as a replay's `RecordingReader` does, and `live` when it does not (#82). |
-| 4 | `recording` | A stored run as a replay answers from it (#82). `Recording.from_events` takes a `StoredRun`'s events and keeps the agent's exchanges in order, by key, apart from the engine's precondition reads. "The same request" is its kind, method, host, path, query pairs sorted by name (a repeated name's values kept in their order) and the service's scope headers (`services.scope_of`, a Stripe account), with the body `bodies.reflect` reads less the route's `volatile:` fields, as canonical JSON, and no other header; an llm call's JSON body less who asked (`metadata`, `user`, `stream`, `stream_options`, `prompt_cache_key`) and every `cache_control`; and a live request is redacted with the store's key first, as the recording was, so a secret matches its placeholder (#69). `take` hands each recorded exchange out once, an llm call's beside whether its recorded call asked to stream and a write's beside its standing in the run's idempotency store (`idempotent-replay`, `idempotency-conflict` or neither, #46), and calls one it cannot serve (cut, a refusal of irimi's, a lost upstream, a target's, a write irimi did not fake, a status outside 200-599, a header the engine could not send) a miss in its place. A read, or a write L3 checked, recorded after a recorded write the replay has not made, or reached once the replay has diverged, shows a world the replay is not in, so it is a miss and the replay diverges. `take_tool_call` does the same for a read tool the SDK asks about (#83): by name and args redacted with the store's key, as canonical JSON, in order. A recorded call with no outcome to give - a result or an error message redaction could not read, a result holding a description (`trace.holds_description`), or a call stopped from outside (`trace.STOPPED_ERROR_TYPES`) - is a miss in its place that uses up nothing else, so the body that then runs is answered from the recording. An answered call uses up the exchanges recorded within its span, its body's HTTP, which the replay never makes, and the read tool calls within it that a later call of the same name and args would otherwise take, the tools its body called (a span cannot tell those from another task's, which is left to answer its own call); it is placed under the world rule where its body began, and one recorded after a write the replay has not made misses without diverging, since its body then runs. A write tool call is never kept, since with no tool overlay (#119) no recorded read shows one. The replay's state is here and only here: what has answered, and whether the replay has diverged (`diverge`, `diverged`), engine-wide as the write log is. `RecordingReader` is a `reader.Reader` over the recording's precondition reads, never used up, whose reads are recorded `recording` and `from-recording`: a replay never checks a precondition against live state. Pure but for one lock. |
-| 5 | `policy` | `AnswerPolicy` and `ShadowPolicy`: the decision, and only the decision. Part of deciding a mapped write is L3 (#45): the precondition's one real read goes through `reader.Reader`, and the policy returns that read, marked `issued_by: engine`, on the `Answer` for the engine to record. Also the idempotency lookup (#46), which sits between the live-kind check and L3 and finds a write's slot with `idempotency.slot_for`: a retry with a key this run has already answered returns the first answer and issues no precondition read, and a key reused with different parameters is answered with the service's own `idempotency_error`. The accepted local fake, the one path left after all of those, is the only `Answer` that carries its route's `fires:` as `would_fire` (#47). `ReplayPolicy` answers a run from a `recording.Recording` (#82): an llm call, a write, and a read until the replay has diverged (a write that missed, or a read that shows a recorded write the replay has not made), with the answer the recorded run got, flagged `from-recording` and stamped as it was recorded (`live` as `recording`), so a write keeps its level and its minted ids and an overlaid read its `↳` line; and everything else as the `ShadowPolicy` it holds decides it, reading the recording for L3, flagged `replay-miss`. A write that misses makes the replay diverge. Telemetry and delegation are never looked up, and a matcher that raises is a miss. `recorded_tool_call` is a read tool's answer from the recording (#83): `ReplayPolicy`'s, a lookup that raises a miss, and `ShadowPolicy`'s always None. `ShadowPolicy.remember` keeps a replayed write under its idempotency key, and `ShadowPolicy.idempotency_flag` gives a write's standing in the run's idempotency store, which a replay matches on. |
-| 5 | `overlay` | The `Overlay` seam and `ServiceOverlay`, which applies `services`' effect tables to a live read and translates a cursor naming a minted id before the read is forwarded. `NoOverlay` stays, for tests and for a mode with no overlay. The module's header lists the two hazards every overlay must respect. It may also replace a response's STATUS, which only a read of a minted object ever asks for: Stripe answers `GET /v1/refunds/{minted}` with a 404 and Slack answers a minted thread with `thread_not_found` at 200, and both are answered from the write log instead (#52). |
-| 5 | `store` | The trace store (#70). `TraceStore` is the seam: `start_run`, `record`, `record_tool_call`, `end_run`, `stats`, `close`, none of which may raise. `DirectoryStore` writes the layout in `docs/trace-format.md`: each public method only enqueues onto a bounded queue and returns, and one daemon writer thread redacts (`redact`), hashes and writes, so a hook never blocks on disk. A full queue or a failed write drops the event and counts it on the store (`stats()`) and on its run (`dropped_events`), and a start for a run that has already ended is dropped, counted on the store alone, and changes nothing (#97). The queue is bounded in items and in bytes - an exchange's bodies, and a tool call (#76) and a run's start (#99) as their whole JSON, while an end costs no bytes, its error waiting cut outside secrets to `MAX_QUEUED_ERROR` and redacted whole before it is cut to a label (#179) - a body too big to redact is never queued, and a run's state is forgotten when it ends, so a `serve` running for weeks holds only the runs still open (one whose end never arrives, and a `header` run, which never ends, are held until `close()`). Everything it writes is `0700`/`0600`. A run id the store cannot use as a directory - one `trace.is_valid_run_id` refuses, or one differing only in case from a run already on a case-insensitive filesystem - is stored in `unattributed/` and flagged `bad-run-id`. `StoreReader` reads it back, and `load_run(run_id, bodies=False)` reads a run's events without opening a blob, for a caller that only counts them (`irimi runs list`, #72). `NullStore` keeps nothing. `stats()` reports the writer's counters (queued, written, dropped), which the control endpoint's health answer carries (#73), and `names_a_run_dir` is the one statement of which run ids may name a directory, which the control endpoint refuses others by. `on_run_ended` is called on the writer thread once a run's end is on disk, which serve mode prints the run's summary from, and `ServeLock` holds `serve.lock`, so a root has one serve (#77). A store a replay writes (`replay_of`) makes every run it starts or makes from a header that replay's, by `trace.mode_for`, and writes only the runs it makes: an event naming any run already in the store - the one it replays, or another the recorded process held - goes to `unattributed/`, flagged, as a clash's does, and a start or end posted for one is dropped (#82). |
-| 6 | `control` | The control endpoint, `/_irimi/` on irimi's own listener (#73): where the SDK posts a run's start, its end and the tool calls the proxy cannot see, and `GET /_irimi/health`. `ControlEndpoint.answer` turns one `Request` into one `Response` and hands what it decoded to the `TraceStore`, so the proxy stays the only writer to the store. Posted records are decoded with `trace.run_from_json` and `trace.tool_call_from_json`, the same rules a stored one is read by, and a posted error is handed to the store whole, which redacts it before it cuts it to a label, its message to `trace.MAX_ERROR_MESSAGE` and its type to `trace.MAX_ERROR_TYPE` (#99, #179); only the copy the live line prints is cut here. The process run's start and end are irimi's, so the SDK may post tool calls to that run but never its start or end; a tool call made in no run at all may name `unattributed`, as no start or end may (#76), and a read tool's lookup may name either. It answers `tool-calls/recorded`, whose body is `trace.RECORDED_LOOKUP_FIELDS` and nothing else, by asking the engine's policy (`AnswerPolicy.recorded_tool_call`), so whether irimi replays is the policy's to say here as on the wire: a `ReplayPolicy` answers from its recording, a `ShadowPolicy` never, and the answer is `trace.recorded_outcome_to_json`'s, or `404` (#83). It never raises: a refusal is a 4xx naming what was wrong, anything else a 500. Every answer is stamped `Irimi-Answered-By: control`. No mitmproxy: the engine detects a control request (`is_control_request`) and translates. |
-| 7 | `engine` | The `Engine` protocol and `EngineConfig`, whose `replay_of` names the stored run a replay answers from (#82). `engine/mitm.py` is the only mitmproxy-backed implementation and the only module that imports mitmproxy. |
-| 8 | `report` | Everything a run prints: banner, per-exchange line, per-tool-call line, exit summary, and `irimi runs list` / `runs show` over a stored run. Pure text. A write tool whose stand-in ran gets a summary line after the HTTP writes, and a tool call is in no count (#76). The summary has one implementation, `_summary`: `summary_lines` feeds it the engine's exchanges and `stored_summary_lines` a `StoredRun`'s, each telemetry exchange reduced to its host because that is all the store keeps of one, so a stored run prints the block `irimi shadow` printed (#72). A write's `human:` template is found by matching its path, and by the `operation` it recorded (`MapIndex.route_named`) when the stored path is a redaction placeholder no route matches, as a credential-path host's is (#72). A write line's fidelity is derived from `answered_by` and `precondition` together in one place (`_fidelity`), so `L3 preconditions passed`, `L2` and `✗ ... would fail: <code>` cannot drift apart (#45), and a replayed write is not printed or counted a second time (#46). Each of the agent's own reads that the overlay edited or flagged `partial` hangs as a `↳` line under the most recent write of its own service that the overlay could have shown it - `exchange.is_authored_write`, the write log's own rule, so a refused write is printed but never has a read under it - read off `Exchange.overlay` and not `answered_by` alone (#43, #48): `saw it  overlay` for a body irimi edited, `saw it in part  overlay (partial)` for one it edited knowing the world it showed was incomplete, and `did not show it  live (partial)` for one it left untouched knowing the same (`recording (partial)` when a replay answered it from the recording, #82). A read irimi only translated stays `live` with `overlay: full` and gets no line. The closing `Would have fired:` clause is built from `Exchange.would_fire`, never from `route.fires`, so a rejected, conflicting, replayed or delegated write lists nothing (#47). In the per-host block an engine-issued read is its own phrase and stays out of the headline `N reads` and its `(M showing this run's writes)` bracket, which mean the reads the agent made (#45, #48); a read a replay answered from the recording is one of them, and the bracket says how many (`M from the recording`, #82). An amount is formatted from the request's own currency first and from `Exchange.currency` second - the code the write's L3 read found - and from nothing else, so an amount irimi cannot denominate prints as it was sent (#60). The summary's write rules and lines are public for `compare` to print the same ones (#79): `is_intercepted` (an exchange the summary prints a write line for), `is_stood_in` (a write tool whose stand-in ran), `write_sentence` and `tool_write_sentence` (each one's line without the indent and before it is escaped), and `printable`, the one rule `runs show` and the summary escape the agent's text by, so a newline in a Slack post cannot split a line and a lone surrogate cannot make printing it raise; `run_label` names a stored run's trigger, entrypoint and agent version in one line. A run a replay stored is marked by `run_attribution`, `runs list`'s column: `replay of <id>` for the process run `irimi replay` stores, `<attribution>, replay of <id>` for an `sdk` or `header` run its store made, so the column never hides which; `runs show` prints `mode:` and `replay of:` lines, read off `RunRecord.mode` and `replay_of`, and `stored_summary_lines` opens a replay's block `irimi replay · run` (#154). |
-| 8 | `runner` | Process plumbing for `irimi shadow`: the child's environment, `IRIMI_CONTROL` included (#73), and `IRIMI_REPLAY_RUN` only when the engine replays (#83), and a `ChildCall`'s three variables only for a replay's child that calls a trigger (#84), the engine thread, and the process run's record (`process_run`, `end_process_run`, #70), a replay's with the trigger it replays, ended with what its call raised (#84). |
-| 9 | `compare` | Two stored runs side by side, write by write, with no verdict (#79). A run's actions are its summary's write lines, in `seq` order: each exchange `report.is_intercepted` keeps, keyed by service and operation, and each tool call `report.is_stood_in` keeps, keyed by the tool's name, the two keys of different lengths so neither can pair with the other; each action is `report.write_sentence` or `tool_write_sentence`, compared as it is and printed through `report.printable`, since escaping prints a newline and a typed `\n` alike; a pair whose two lines would print alike so prints both with each backslash escaped too. `align` lines the runs up with `difflib` in two passes: the actions that are the same, key and text, anchor first (a cut action anchors nothing), and what lies between them lines up by key, so a second, refused refund reads as added rather than pairing with the first and calling the first added. `compare_runs` returns a `Comparison`, its rows, totals and `diff(1)`-style exit code, and `header_lines` is `irimi compare`'s own header, so `irimi replay` prints its own over the same rows (`replay`, #84), with `args_differ`'s note. A pair either exchange of which is flagged `body-truncated` (the flag does not say whether the request or the response was cut) is `?`, not compared, whatever its texts, and never `=` (#94). The triggers' args are compared as sorted JSON, so `true` is not `1`. Pure text. |
-| 10 | `replay` | What `irimi replay` runs and what it says of a replay (#84). `plan` is what a stored run is replayed by - `-- CMD`, a call of `--call` or the trigger's entrypoint with `--args` or the trigger's args, or a process run's argv - or `Refused` saying why none; `not_replayable` is why a trigger's recorded args cannot be given back (no trigger, `<redaction-failed>`, a description, `replayable: false`, not an object). `outcome` reads both stored runs and how the agent `Ended` (its exit, its `CallOutcome`, a signal that stopped irimi): the divergence point, the first of the replay's events that missed (an agent exchange flagged `replay-miss`, a read tool that ran `real`), the counts and the recorded calls never made, dropped events, and `compare.compare_runs`'s comparison, whose exit code is the replay's but for a trigger the child could not call (2), a stopped replay (130, 143) and dropped events (never 0). A call recorded within a read tool's span is the tool's body's (`recording.made_within`) and is not counted. `Outcome.result` and `refused` are the two `ReplayResult`s it can be. Pure text. |
-| 11 | `cli` | argparse and the composition root. `_prepare_run` loads this install's redaction key once, and, for `irimi replay`, keys the run it replays, read back whole by `_load_source` before anything starts, as a `Recording` matched against that key (#82, #84), before it opens the trace store under `--store` with the same key; `_build_engine` is the one place the concrete engine, policy, store and overlay meet, and builds a `ReplayPolicy` over that recording instead of a `ShadowPolicy`, which answers the control endpoint's read-tool lookups too (#83). `cmd_replay` is `irimi replay` (#84): `replay.plan`; `_replay_python`, the Python a call's child runs under, irimi's own or `--python`'s, which is first asked whether it can import irimi's replay child and which irimi it has (#162); the child run under the engine as `irimi shadow` runs one (`_under_the_engine`, given a `_Launch`, returning a `_Ran`, which both share), then `replay.outcome` over both stored runs; a refusal exits 2, its result holding what irimi said on stderr (`_keeping_stderr`), and `_replay_command` keeps a command typed after `--` from being read as RUN_ID. `cmd_serve` is serve mode (#77): the engine on `runner`'s thread with no child, stopped by SIGINT, SIGTERM or a `stop` event, with `_ServeOutput` printing each line and each run's stored summary, from the store's `on_run_ended`. Under `irimi shadow -- <cmd>`, SIGTERM is passed to the command (`_Child`), whose exit ends the run and closes the store as any exit does (#77). |
-| 12 | `__main__` | `python -m irimi`, the `irimi` command run by its interpreter, as `sdk.replay()` runs it (#84). |
+| `engine.Engine` | run, shut down, wait for the listener, report its port | `MitmEngine`; the CLI never touches mitmproxy |
+| `decide.policy.AnswerPolicy` | decide one request: `Forward`, `Delegate` or `Respond`; synchronous, called on a worker thread | `ShadowPolicy`, `replay.policy.ReplayPolicy` |
+| `decide.overlay.Overlay` | apply a run's faked writes to a live read, and translate a read before it is forwarded; pure | `ServiceOverlay`; `NoOverlay` for tests |
+| `decide.reader.Reader` | make irimi's check read | `UpstreamReader`, `NoReader` (no check), `replay.index.RecordingReader` |
+| `record.store.RunStore` | take run starts, exchanges, tool calls and run ends; never raises or blocks | `DirectoryStore`; `NullStore` in `tests/support` |
+| `sdk._control_client.Reporter` | post the SDK's runs and tool calls, and look up recorded tool calls | `ControlClient` |
 
-`src/irimi/maps/*.yaml` are the shipped service maps. They are data, contributable without
-touching Python, and `tests/test_servicemap.py` pins their contents.
-`src/irimi/fixtures/*.json` are the response objects those maps' `fixture:` keys name - vendored
-from the service's own mock where one exists (Stripe), hand-written against its published docs
-where none does (Slack). Each file says which in its `_source` entry, and the same test proves
-both directories are inside a built wheel.
-A `write` or `unknown` route may also name a `fires:` list of the webhooks the real service would
-have sent, which the exchange carries as `would_fire` for the writes irimi accepted and faked;
-nothing is delivered (#47).
-
-## The seams
-
-Four protocols are where later phases plug in, and the reason the rest of the code can be tested
-without a proxy:
-
-- **`engine.Engine`** - run, shutdown, wait for the listener. `runner.start_engine` drives it on a
-  background thread; `cli` never touches mitmproxy directly.
-- **`policy.AnswerPolicy`** - given a `Request`, its `Classification` and (defaulted, #45) the
-  run's write log and id, return an `Answer`: forward live, delegate, or send this response. It
-  stays synchronous; the engine calls it on a worker thread. `ShadowPolicy` takes a
-  `reader.Reader` for the L3 precondition read; built without one it does no L3 at all and records
-  `precondition: None`. Replay is a new policy, not a new branch (#82): `ReplayPolicy` answers from
-  a recording and hands the rest to a `ShadowPolicy` whose reader is that recording. A replay is
-  one run, so only `irimi replay` replays, and serve mode cannot (#84).
-- **`overlay.Overlay`** - given the write log, a read request and the upstream response, return
-  an `Overlaid`: the response the agent should see, and how much of the write log that read could
-  express. Its request side, `rewrite`, translates a read before it is forwarded. Both are pure
-  functions of their arguments, and the engine asks `rewrite` of a read before the policy decides,
-  so the policy and the trace see the read as irimi would ask it (#82).
-- **`store.TraceStore`** - where a run's record, its exchanges and its tool calls go (#70).
-  `irimi shadow` starts its process run before spawning the child and ends it with the child's
-  exit code; an exchange whose run has no start creates a `header` run. No method may raise or
-  block: `record` is called from mitmproxy's hooks. `DirectoryStore` is the only real store, and
-  a replay reads what it wrote with `StoreReader`; a store a replay writes makes every run it
-  starts, or makes from a header, that replay's (`mode: replay`, `replay_of`, by `trace.mode_for`,
-  #82), and writes no run it did not make, the run it replays included. An SDK run's start, end
-  and tool calls reach it through the control endpoint (#73), never from the agent's process
-  directly.
-
-## Rules the code holds itself to
-
-Each of these has been a real bug here; each is now enforced by a test, and most are enforced
-twice - once where a configuration is loaded and again at the decision it protects.
-
-- **Never raise in the `request` hook.** A raised hook forwards the flow, and a forwarded write
-  escapes shadow mode. The decision fails closed as a whole (`decision-failed`), and the L0 echo
-  never raises on any body.
-- **THE SCOPE RULE.** No classification that forwards live may apply to an unsafe method it did
-  not name explicitly. The loader refuses a live `default_kind`, a live kind on `*`, and a live
-  kind on `DELETE`/`PUT`/`PATCH` without `persists: false` and a `comment:`; the classifier
-  downgrades anything that reaches it anyway (`kind-downgraded`). `servicemap/rules.py` tells the
-  story.
-- **Stamping.** Every response irimi decided carries `Irimi-Answered-By` naming the answer;
-  a live forward carries none, because absence is how a client tells the real service's response
-  from ours. `tests/test_invariants.py` checks this against a real run and against policies
-  built to break it. A control endpoint answer carries `control`, which is not an `answered_by`
-  value because a control request is never an exchange (#73).
-- **Irimi's own wire vocabulary is never the agent's.** `Irimi-Rewrote` names the query pair irimi
-  dropped from a read it translated, and the response side reads it to decide a page already
-  follows a minted refund - so an agent-sent one could suppress the agent's own refund from that
-  page. It is stripped in the `request` hook, before the decision and whatever the write log
-  holds, and again in `ServiceOverlay.rewrite` for callers that do not come through the engine
-  (#53). `Irimi-Run` names the run a request belongs to; the `request` hook reads it and then
-  strips it from the flow and the recorded request, so no live forward, answer target or L3
-  read carries the agent's run id to a service, and `Exchange.run_id` is the one place it is
-  kept (#67).
-- **Targets stay on the machine.** A target must be loopback unless `--allow-target-host` says
-  otherwise; a credential-path host (`hooks.slack.com`) has no such escape; irimi's own listener
-  is never a target; credential headers are stripped unless the route opts in. `netaddr` is the
-  one spelling of "loopback" all of these share.
-- **Nothing reaches disk unredacted, and the live flow is never redacted.** The store redacts its
-  own copy of each exchange with `redact.redact_exchange`; the engine and the agent's answer never
-  see a placeholder. A part that cannot be redacted is stored as `<redaction-failed>`, never as it
-  was (#69).
-- **A recording failure never affects traffic** (design §5.2). No `TraceStore` method may raise
-  or block: `DirectoryStore` only enqueues, and drops and counts what it cannot write. `_finish`
-  guards the call anyway, so a store that breaks the contract costs the exchange its record, never
-  the hook, the terminal line or the summary (#70).
-- **Telemetry is forwarded and its requests and responses are never stored.** One line per
-  exchange records only that it happened and to which host, so a stored run's summary can count
-  it. A trace of the agent's own observability traffic is noise, and replaying it would re-emit
-  someone else's events (#70).
-- **L0 is the floor.** A route with no `fixture:`, and a fixture this install cannot read, are
-  both answered with the L0 echo rather than refused - the second carries `fixture-failed`, so
-  the trace never claims a fidelity the answer did not have.
-- **A delegated service gets no overlay, and a streamed response is never rewritten.** Both are
-  written down at the top of `overlay.py` for Phase 2 to inherit.
-- **A write L3 rejected never enters the write log, and shadow mode is never built without a
-  reader.** The first keeps a write irimi says would have been refused from being replayed onto
-  later reads as though it had happened; the second is what stops the whole L3 path from silently
-  doing nothing in the product while every test that builds a policy bare still passes.
-  `tests/test_invariants.py` holds both against a real run (#45).
-- **A precondition says `not_evaluable` rather than guessing, in either direction.** A false
-  rejection invents a refusal the service never made; a false pass claims a check that never ran,
-  and the summary prints `L3 preconditions passed` off it. So a non-200, an unparseable body, an
-  overlay that knows it is `partial`, and a document the check itself cannot read all record
-  `not_evaluable` and fake the write at L2 (#45).
-- **A read of an object this run minted is answered, not left as the service's refusal.** It is
-  the one read the real service could not have answered: it has never heard of the id, so it
-  refuses, and handing the agent that refusal for an object irimi told it exists is the
-  contradiction the overlay exists to prevent. The read still goes out and still counts as a real
-  read; the overlay replaces the body and, for Stripe's 404, the status. Only over the service's own
-  not-found (`resource_missing`, `thread_not_found`): a rate limit or a bad key on the same read is
-  left as sent and `partial`, because production would have sent it for the real object too. Every
-  other effect leaves the status the service's. The alternative - answering such a read locally, off the write log,
-  the way a faked write is - was weighed and refused, because it makes a read irimi never forwards
-  (#52).
-- **Only a write that would have happened lists its webhooks.** `would_fire` is set on the one
-  path where irimi accepted and faked a write, so an L3 rejection, an idempotency conflict, a
-  replay and a delegated write all list nothing by construction, not by a second check - the same
-  set the write log holds. A replay listing its events again would promise one refund's
-  `refund.created` twice. `tests/test_invariants.py` holds it against a real run (#47).
+Commands that start a proxy also take an `engine_factory`, so the tests and the sample workflow
+harness build their own engine without patching the composition root.
 
 ## State on disk
 
 ```
 $IRIMI_HOME/            default ~/.irimi
   ca/ca.key             the local CA's private key (0600)
-  ca/ca.pem             the CA certificate the child process is told to trust
-  mitm/mitmproxy-ca.pem key + cert, the bundle mitmproxy mints leaf certificates from
-  redact.key            the redaction HMAC key (0600), created on first use (#69)
-  store/                the trace store, unless --store names another (#70):
-    blobs/<sha256>        a redacted body, written once
-    runs/<run_id>/        run.json and events.jsonl, one directory per run
-    unattributed/         events.jsonl for events no usable run id claimed
-    serve.lock            held by the one serve writing this store, while it runs (#77)
-  maps.yaml             optional: the user's overrides file (targets only)
-./irimi.maps.yaml       optional: a per-project overrides file; wins over the one above
+  ca/ca.pem             the CA certificate the child is told to trust
+  mitm/mitmproxy-ca.pem key and certificate, which mitmproxy mints leaf certificates from
+  redact.key            the redaction HMAC key (0600), created on first use
+  store/                the trace store, unless --store or $IRIMI_STORE names another
+  maps.yaml             optional: the overrides file, when the working directory has none
+./irimi.maps.yaml       optional: the overrides file for this directory
 ```
 
-No config file chooses the mode. The command is the mode. Under `irimi shadow -- <cmd>` one
-process tree is one run, stored as the `process` run; the child learns the run id, 16 hex
-characters, from `IRIMI_RUN`, and where the control endpoint is from `IRIMI_CONTROL` (#73). Under
-`irimi shadow --serve`, and `irimi serve`, its alias, there is no child and no process run: the
-engine's own run is `unattributed`, every run is one the SDK names on its requests, and the agent
-is given `IRIMI_CONTROL` by whoever deploys it (#77).
+The store's own layout is in [trace-format.md](trace-format.md#layout).
+
+## Store internals
+
+`record/store/writer.py`'s `DirectoryStore` is the only writer.
+
+- **Never in the way.** Its public methods only enqueue; one daemon thread (`irimi-store`) redacts
+  each event with `redact.for_disk` and writes it. The queue is capped at 10,000 items and 256 MiB
+  of bodies, and a body over 64 MiB is dropped before queueing. A full queue or a failed write
+  drops the event, counts it on the store and on its run, and logs on the first drop and every
+  thousandth.
+- **Appends.** `events.jsonl` is appended one whole line at a time, each in one `write` on an
+  `O_APPEND` descriptor, so lines from several processes never interleave. A line the disk refused
+  half-way is truncated away again, without touching a line another process appended after it.
+- **Syncs.** Nothing is synced per line. The blobs and event files a writer touched are synced after
+  1000 writes, after a second idle, when a run ends (its `events.jsonl`) and on close. A `run.json`
+  is written to a temporary file, synced and renamed into place, so a crash leaves the old record
+  or the new one.
+- **Crashes.** A final line a crash cut off is skipped on read. A store that resumes the run (a
+  restarted `irimi serve`) truncates it before appending and continues `seq` after the last line it
+  can read. A blob a crash tore is rewritten by the next event that needs it.
+- **Sharing a root.** One process writes a given run; several may share a root, since run
+  directories never collide and a blob is the same bytes whoever writes it. `unattributed/` is the
+  one shared file, so each writer numbers its own lines there. A serve fills it, so a root has at
+  most one: it holds an exclusive `flock` on `serve.lock`, which the kernel releases however the
+  process exits. Every store also holds a shared `flock` on the root directory while it writes,
+  and `irimi runs rm` and `runs prune` take both locks exclusively, so they never delete a run in
+  progress.
+- **Bounded memory.** An ended run's state is forgotten, so a long serve does not grow with the
+  runs it has finished. `close` waits up to 10 seconds for the queue to drain.
+- **Reading back.** `record/store/reader.py` lists runs and loads one run's events in `seq` order,
+  with bodies or without (`runs list` reads none, but checks each blob exists at its size).
+  `retention.py` deletes runs and the blobs no remaining run refers to.

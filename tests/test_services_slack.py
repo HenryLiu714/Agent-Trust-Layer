@@ -1,15 +1,16 @@
-"""Slack's L2 effects (#44): what a faked post does to a later live read, as pure functions."""
+"""Slack's overlay effects: what a faked post does to a later live read, as pure functions."""
 
 import copy
 import json
 
 import pytest
 
-from irimi.exchange import Request
+from irimi.core.exchange import Request
 from irimi.services.model import Read, Write
-from irimi.services.slack import THREAD_FIELDS, apply_read
+from irimi.services.slack.effects import THREAD_FIELDS, apply_read
+from tests.support.credentials import SLACK_BOT
 
-# Minted `ts` values sit above every real one, as `echo.slack_ts` guarantees (#42).
+# Minted `ts` values sit above every real one, as `services.TsClock` guarantees.
 MINTED1 = "1800000000.000001"
 MINTED2 = "1800000000.000002"
 REAL_OLD = "1700000000.000100"
@@ -22,8 +23,7 @@ def _message(ts, text="hi", user=BOT):
 
 
 def _post_write(channel="C0123", ts=MINTED1, text="hi", **posted):
-    """A `chat.postMessage` as `echo.slack.slack_l1_body` answers it: the envelope echoes the
-    posted channel verbatim, and `message.ts` is the envelope's minted `ts`."""
+    """A faked `chat.postMessage`: the posted channel verbatim, and the envelope's minted `ts`."""
     return Write(
         operation="chat.postMessage",
         posted={"channel": channel, "text": text, **posted},
@@ -123,8 +123,7 @@ def test_a_post_to_another_channel_id_is_skipped_and_not_partial():
 
 
 def test_a_post_to_a_channel_name_read_back_by_id_is_partial():
-    """`chat.postMessage` accepts `#general` and the echo keeps it verbatim, where real Slack
-    would have answered with the id. irimi cannot tell whether it is `C0123`, so it says so."""
+    """A post to `#general` read back by id is partial: irimi cannot tell if it is `C0123`."""
     page = _history_page(REAL_OLD)
     before = copy.deepcopy(page)
     out = apply_read(_history(), page, [_post_write(channel="#general")])
@@ -143,8 +142,7 @@ def test_a_post_already_in_the_page_is_not_inserted_twice():
 
 
 def test_a_history_page_is_never_truncated_and_keeps_slacks_paging():
-    """Slack's cursor is opaque and server-issued: dropping the oldest real message to keep the
-    page at its limit would make the cursor skip it for good (#44)."""
+    """A history page keeps every real message and Slack's cursor, since the cursor is opaque."""
     out = apply_read(
         _history(limit=2),
         _history_page(REAL_NEW, REAL_OLD, has_more=True, next_cursor="bmV4dA=="),
@@ -240,7 +238,7 @@ def test_a_faked_parent_in_history_carries_its_faked_reply():
 
 
 def test_a_reply_is_appended_at_the_tail_of_a_replies_page():
-    """Replies come parent first, then OLDEST first, so a faked reply is last (#44)."""
+    """Replies come parent first, then oldest first, so a faked reply is last."""
     out = apply_read(
         _replies(REAL_OLD),
         _replies_page(_threaded_parent(REAL_OLD), REAL_NEW),
@@ -254,8 +252,9 @@ def test_a_reply_is_appended_at_the_tail_of_a_replies_page():
 
 
 def test_a_replies_page_with_more_behind_it_gets_no_reply_but_its_parent_still_counts_it():
-    """The reply belongs on the last page, so this one is not `partial`. The parent's counts still
-    move: Slack reports the thread's true `reply_count` on every page of it (#44)."""
+    """A faked reply goes on the last page only, but the parent's counts move on every page.
+
+    Slack reports the thread's true `reply_count` on each page."""
     out = apply_read(
         _replies(REAL_OLD),
         _replies_page(_threaded_parent(REAL_OLD), REAL_NEW, has_more=True),
@@ -352,8 +351,7 @@ def test_a_reply_to_another_thread_leaves_the_page_alone():
 
 
 def test_a_faked_reply_carries_the_thread_it_is_in():
-    """Real Slack puts `thread_ts` on every reply it shows, and irimi knows the value exactly - the
-    caller posted it. A reply without it is a body production cannot produce (#44, #55)."""
+    """A faked reply carries the posted `thread_ts`, as every real reply does."""
     out = apply_read(
         _replies(REAL_OLD),
         _replies_page(_threaded_parent(REAL_OLD), REAL_NEW),
@@ -364,7 +362,7 @@ def test_a_faked_reply_carries_the_thread_it_is_in():
 
 
 def test_a_faked_top_level_post_gains_no_thread_ts():
-    """The other half of #55: a post that is in no thread must not claim to be in one."""
+    """A post that is in no thread must not claim to be in one."""
     out = apply_read(_history(), _history_page(REAL_OLD), [_post_write()])
     assert "thread_ts" not in out.document["messages"][0]
 
@@ -379,8 +377,7 @@ def test_a_broadcast_in_history_carries_the_thread_it_is_in():
 
 
 def test_the_write_logs_message_is_never_mutated():
-    """The answer's `message` is shared by reference with the write log (#44); a faked parent
-    grows thread fields on a copy only."""
+    """A faked parent grows thread fields on a copy; the write log's `message` is never mutated."""
     parent = _post_write(ts=MINTED1)
     original = copy.deepcopy(parent.answer)
     apply_read(_history(), _history_page(REAL_OLD), [parent, _reply_write(MINTED1, ts=MINTED2)])
@@ -445,7 +442,7 @@ def test_an_unknown_read_parameter_is_partial():
 
 
 def test_include_all_metadata_is_known_to_replies_too():
-    """Slack documents it on both methods; `REPLIES_PARAMS` is `HISTORY_PARAMS` plus `ts` (#44)."""
+    """Slack documents it on both methods; `REPLIES_PARAMS` is `HISTORY_PARAMS` plus `ts`."""
     out = apply_read(
         _replies(REAL_OLD, include_all_metadata=True),
         _replies_page(_threaded_parent(REAL_OLD)),
@@ -456,7 +453,7 @@ def test_include_all_metadata_is_known_to_replies_too():
 
 
 def test_the_token_parameter_is_known():
-    out = apply_read(_history(token="xoxb-1"), _history_page(REAL_OLD), [_post_write()])
+    out = apply_read(_history(token=SLACK_BOT + "1"), _history_page(REAL_OLD), [_post_write()])
     assert _ts_of(out.document) == [MINTED1, REAL_OLD]
     assert out.partial is False
 
@@ -475,10 +472,9 @@ def test_an_error_body_is_never_edited_and_partial_only_when_a_post_applies():
 
 
 def test_replies_of_a_minted_parent_is_answered_from_the_write_log():
-    """#52's Slack half. Slack answers `thread_not_found` at HTTP 200 for a thread it never saw -
-    and this thread is one irimi minted, parent and reply both. The page is built rather than
-    edited, because there is no live body to preserve, and no status moves: Slack's error is
-    already a 200, which is the evidence #52 weighed."""
+    """A replies read of a thread irimi minted is built from the write log.
+
+    Slack's `thread_not_found` is already a 200, so no status moves."""
     parent = _post_write(ts=MINTED1)
     reply = _reply_write(MINTED1, ts=MINTED2)
     out = apply_read(_replies(MINTED1), {"ok": False, "error": "thread_not_found"}, [parent, reply])
@@ -488,8 +484,7 @@ def test_replies_of_a_minted_parent_is_answered_from_the_write_log():
     assert out.document["ok"] is True
     assert out.document["has_more"] is False
     assert _ts_of(out.document) == [MINTED1, MINTED2]
-    # The parent carries the thread fields its own reply gives it, which is what makes a replies
-    # page one production could produce (#44's THREAD_FIELDS rule).
+    # The parent carries the thread fields its reply gives it (the `THREAD_FIELDS` rule).
     head = out.document["messages"][0]
     assert head["thread_ts"] == MINTED1
     assert head["reply_count"] == 1
@@ -497,8 +492,7 @@ def test_replies_of_a_minted_parent_is_answered_from_the_write_log():
 
 
 def test_a_minted_parent_with_no_replies_answers_the_message_alone():
-    """Real Slack answers `conversations.replies` on an un-replied message with that message and
-    nothing else. A minted one is no different (#52)."""
+    """A minted parent with no replies is answered with that message alone, as Slack does."""
     parent = _post_write(ts=MINTED1)
     out = apply_read(_replies(MINTED1), {"ok": False, "error": "thread_not_found"}, [parent])
     assert out.changed is True
@@ -507,8 +501,7 @@ def test_a_minted_parent_with_no_replies_answers_the_message_alone():
 
 
 def test_replies_of_a_thread_this_run_did_not_mint_is_left_alone():
-    """`thread_not_found` for a thread irimi has nothing to do with is Slack's own answer about
-    Slack's own state. Untouched, and `partial` only on `_would_apply`'s existing rule (#52)."""
+    """`thread_not_found` for a thread irimi did not mint is Slack's own answer, left untouched."""
     error = {"ok": False, "error": "thread_not_found"}
     out = apply_read(_replies(REAL_OLD), dict(error), [_post_write(ts=MINTED1)])
     assert out.document == error
@@ -518,10 +511,9 @@ def test_replies_of_a_thread_this_run_did_not_mint_is_left_alone():
 
 @pytest.mark.parametrize("code", ["ratelimited", "invalid_auth", "missing_scope"])
 def test_a_minted_thread_read_that_slack_refused_for_another_reason_is_not_answered(code):
-    """Only `thread_not_found` is Slack saying it never saw the thread. A rate limit or a bad token
-    on the same read is Slack's answer about the caller, which production would have sent for the
-    real thread too, so building the page over it would turn an error into a success. The error
-    stands, `partial` because the run holds posts this read would have shown (#52)."""
+    """Any other Slack error on a minted thread's read stands, flagged partial.
+
+    Only `thread_not_found` says Slack never saw the thread; the others are about the caller."""
     error = {"ok": False, "error": code}
     out = apply_read(
         _replies(MINTED1), dict(error), [_post_write(ts=MINTED1), _reply_write(MINTED1, ts=MINTED2)]
@@ -543,11 +535,9 @@ def test_a_minted_thread_read_that_slack_refused_for_another_reason_is_not_answe
     ],
 )
 def test_a_minted_thread_read_that_asks_for_part_of_it_stays_partial(shaping):
-    """`_minted_thread` builds the WHOLE thread, so a read asking for a window, a limit or a page of
-    it is one it must decline: answering `limit=1` with the whole thread, or `latest=<a real ts>`
-    with replies Slack would have left out, is the half-apply this module's header forbids in its
-    most visible form. The error stands and the read says the world irimi showed is incomplete
-    (#52)."""
+    """A minted thread read with a window, limit or cursor keeps Slack's error, flagged partial.
+
+    irimi builds only the whole thread, which would be the wrong answer to part of it."""
     error = {"ok": False, "error": "thread_not_found"}
     out = apply_read(
         _replies(MINTED1, **shaping),
@@ -561,9 +551,7 @@ def test_a_minted_thread_read_that_asks_for_part_of_it_stays_partial(shaping):
 
 
 def test_a_minted_parent_read_with_an_unreadable_parameter_stays_partial():
-    """A parameter the effects cannot read means irimi cannot say what this page should hold, so
-    the page is not built and the error stands - today's answer, kept for the cases #52 does not
-    close (#44's `REPLIES_PARAMS` rule)."""
+    """An unknown read parameter keeps Slack's error, flagged partial (`REPLIES_PARAMS`)."""
     error = {"ok": False, "error": "thread_not_found"}
     out = apply_read(_replies(MINTED1, oddity="x"), dict(error), [_post_write(ts=MINTED1)])
     assert out.document == error
@@ -572,10 +560,7 @@ def test_a_minted_parent_read_with_an_unreadable_parameter_stays_partial():
 
 
 def test_a_minted_parent_in_a_channel_the_read_spells_differently_stays_partial():
-    """`chat.postMessage` takes `#general` and `conversations.replies` requires the id, so irimi
-    cannot tell these are the same channel. Leaving a post off a page is one kind of incomplete;
-    building a whole page for a channel irimi cannot match is another kind of wrong, so this one
-    needs a definite match and does not get one (#44, #52)."""
+    """A minted parent posted to `#general` is not matched to a read by id; the error stands."""
     error = {"ok": False, "error": "thread_not_found"}
     out = apply_read(_replies(MINTED1), dict(error), [_post_write(channel="#general", ts=MINTED1)])
     assert out.document == error
@@ -584,10 +569,7 @@ def test_a_minted_parent_in_a_channel_the_read_spells_differently_stays_partial(
 
 
 def test_a_minted_thread_whose_reply_has_no_message_to_show_stays_partial():
-    """The fixture failed and that reply degraded to `fake-L0` (#42): the run put a message in this
-    thread and the overlay has nothing to show for it, so the page cannot be built honestly and
-    Slack's own error stands (#52). Its parent-side twin is the next test (#64).
-    """
+    """A minted thread whose reply has no `message` (an echo answer) keeps Slack's error."""
     error = {"ok": False, "error": "thread_not_found"}
     parent = _post_write(ts=MINTED1)
     mute = Write(
@@ -603,11 +585,10 @@ def test_a_minted_thread_whose_reply_has_no_message_to_show_stays_partial():
 
 
 def test_a_minted_thread_whose_parent_has_no_message_to_show_stays_partial():
-    """The parent-side twin of the test above (#64). The fixture failed and the PARENT degraded to
-    `fake-L0`: its answer is an envelope with no `message`, irimi's minted `ts` on the envelope
-    alone. The post is found by that `ts`, `_minted_thread` declines it for having nothing to
-    show, and Slack's own error stands, `partial`. The thread holds no reply, since a reply's own
-    `thread_ts` would flag this read whatever the parent's `ts` was."""
+    """A minted thread whose parent has no `message` (an echo answer) keeps Slack's error.
+
+    The post is found by the envelope's `ts`. The thread holds no reply, whose own `thread_ts`
+    would flag the read anyway."""
     error = {"ok": False, "error": "thread_not_found"}
     mute = Write(
         operation="chat.postMessage",
@@ -619,15 +600,13 @@ def test_a_minted_thread_whose_parent_has_no_message_to_show_stays_partial():
     assert out.changed is False
     assert out.partial is True
     assert out.status is None
-    # A thread the post did not start is not one it would have touched (#44).
+    # A thread the post did not start is not one it would have touched.
     other = apply_read(_replies(MINTED2), dict(error), [mute])
     assert (other.document, other.partial) == (error, False)
 
 
 def test_a_reply_to_a_thread_irimi_cannot_name_is_still_placed_by_its_own_ts():
-    """A reply whose posted `thread_ts` is not a string has no thread irimi can name, and nothing
-    it can show. Its `ts` is still its own id, so a read of the thread it would start is `partial`
-    and not left unflagged (#64)."""
+    """A reply with a non-string `thread_ts` is still placed by its own `ts`, flagging the read."""
     error = {"ok": False, "error": "thread_not_found"}
     reply = _post_write(ts=MINTED1, thread_ts=17)
     out = apply_read(_replies(MINTED1), dict(error), [reply])
@@ -636,10 +615,7 @@ def test_a_reply_to_a_thread_irimi_cannot_name_is_still_placed_by_its_own_ts():
 
 
 def test_a_post_with_no_message_is_left_off_a_history_window_its_ts_is_outside():
-    """`latest=<a real ts>` excludes a minted `ts`, which is above every real one, so the page
-    needs nothing the run posted and is complete - for a post the overlay cannot show as for one
-    it can. The post is placed by its envelope's `ts` (#64); without the window the page is
-    `partial` (the next test)."""
+    """A post with no `message`, outside the history window, leaves the page complete."""
     write = Write(
         operation="chat.postMessage",
         posted={"channel": "C0123", "text": "hi"},
@@ -654,8 +630,7 @@ def test_a_post_with_no_message_is_left_off_a_history_window_its_ts_is_outside()
 
 
 def test_a_post_whose_answer_has_no_message_is_partial_and_unchanged():
-    """The fixture failed to load and the write degraded to `fake-L0` (#42): the run minted a
-    message for this channel and the overlay has nothing to show for it."""
+    """A post whose echo answer has no `message` leaves the page unchanged, flagged partial."""
     write = Write(
         operation="chat.postMessage",
         posted={"channel": "C0123", "text": "hi"},
@@ -702,13 +677,7 @@ def test_a_body_that_is_not_an_object_is_unchanged():
 
 
 def test_an_answer_that_already_carries_its_thread_ts_inserts_the_same_reply():
-    """Since #55 a faked reply's own answer names the thread, so `_posts`' completion of its copy
-    writes the value it already holds. The inserted message must be the same either way, or the
-    two halves of #44/#55 would disagree about one reply.
-
-    `_reply_write` builds the pre-#55 answer (`thread_ts` in `posted` only); this builds the
-    post-#55 one and asserts the page comes out identical.
-    """
+    """A reply's answer carrying `thread_ts` itself inserts the same message as one without."""
     without = _reply_write(REAL_OLD)
     with_it = _reply_write(REAL_OLD)
     with_it.answer["message"]["thread_ts"] = REAL_OLD
@@ -743,7 +712,7 @@ def _sdk_response(slack_sdk, operation, document):
 
 
 def test_slack_sdk_reads_the_faked_post_back_out_of_history():
-    """#44's done-when, for history."""
+    """slack_sdk reads a faked post back out of an overlaid history page."""
     slack_sdk = pytest.importorskip("slack_sdk")
     out = apply_read(_history(), _history_page(REAL_OLD), [_post_write(text="refund issued")])
     response = _sdk_response(slack_sdk, "conversations.history", out.document)
@@ -752,7 +721,7 @@ def test_slack_sdk_reads_the_faked_post_back_out_of_history():
 
 
 def test_slack_sdk_reads_the_faked_reply_back_out_of_replies():
-    """#44's done-when, for replies."""
+    """slack_sdk reads a faked reply back out of an overlaid replies page."""
     slack_sdk = pytest.importorskip("slack_sdk")
     out = apply_read(
         _replies(REAL_OLD),
@@ -766,8 +735,7 @@ def test_slack_sdk_reads_the_faked_reply_back_out_of_replies():
 
 
 def test_slack_sdk_reads_a_minted_thread_back_out_of_replies():
-    """#52's Slack done-when against the real SDK: `ok: true` is what the SDK reads to decide the
-    call succeeded, and a built page has to satisfy `validate()` like any other."""
+    """slack_sdk reads a thread irimi minted back out of a built replies page."""
     slack_sdk = pytest.importorskip("slack_sdk")
     out = apply_read(
         _replies(MINTED1),

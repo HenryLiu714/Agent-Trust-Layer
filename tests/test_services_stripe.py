@@ -1,12 +1,12 @@
-"""Stripe's L2 effects (#43): what a faked write does to a later live read, as pure functions."""
+"""Stripe's overlay effects: what a faked write does to a later live read, as pure functions."""
 
 import copy
 
 import pytest
 
-from irimi.exchange import Request
+from irimi.core.exchange import Request
 from irimi.services.model import Read, Rewritten, Write
-from irimi.services.stripe import apply_read, rewrite_query
+from irimi.services.stripe.effects import apply_read, rewrite_query
 
 
 def _refund_write(refund_id="re_MINTED1", charge="ch_REAL1", amount=100, **answer):
@@ -39,9 +39,14 @@ def _read(path, query="", headers=()):
     )
 
 
-def _asked(operation, path, query="", headers=()):
+def _asked(operation, path, query="", headers=(), translated_from=None):
     """A `Read` for a Stripe GET: its parameters are in the query string and it posts nothing."""
-    return Read(operation=operation, request=_read(path, query, headers), posted={})
+    return Read(
+        operation=operation,
+        request=_read(path, query, headers),
+        posted={},
+        translated_from=translated_from,
+    )
 
 
 def _charge_doc(**extra):
@@ -203,9 +208,9 @@ def test_a_refunds_page_filtered_by_charge_only_shows_a_matching_minted_refund()
 
 
 def test_a_filter_the_minted_refund_cannot_answer_is_partial():
-    """The refund fixture's `payment_intent` is null, so a refund posted with only `charge` cannot
-    say whether it belongs on `?payment_intent=pi_X`. Dropping it and calling the page complete
-    hid the agent's own refund; irimi says `partial` instead (#43)."""
+    """A filter a minted refund cannot answer marks the page partial instead of hiding the refund.
+
+    A refund posted with only `charge` cannot say whether it belongs on `?payment_intent=pi_X`."""
     page = _refunds_page("re_REAL1")
     before = copy.deepcopy(page)
     out = apply_read(
@@ -219,8 +224,7 @@ def test_a_filter_the_minted_refund_cannot_answer_is_partial():
 
 
 def test_a_filter_the_minted_refund_does_answer_is_not_partial():
-    """`partial` is for what irimi cannot tell, not for what does not match: a minted refund
-    carrying a different `payment_intent` really is absent from this page."""
+    """A filter a minted refund does answer is not partial, whether it matches or not."""
     out = apply_read(
         _asked("refunds.list", "/v1/refunds", query="payment_intent=pi_OTHER"),
         _refunds_page("re_REAL1"),
@@ -240,14 +244,13 @@ def test_a_filter_the_minted_refund_does_answer_is_not_partial():
 
 
 def test_an_older_refund_that_might_be_behind_the_cursor_is_partial():
-    """The page after a minted refund is only fully modelled when irimi knows every older minted
-    refund is absent from it. One whose filter it cannot answer might belong here."""
+    """An older minted refund whose filter irimi cannot answer marks the next page partial."""
     out = apply_read(
         _asked(
             "refunds.list",
             "/v1/refunds",
             query="payment_intent=pi_1",
-            headers=[("irimi-rewrote", "starting_after=re_MINTED2")],
+            translated_from="starting_after=re_MINTED2",
         ),
         _refunds_page("re_REAL1"),
         [_refund_write("re_MINTED1", payment_intent=None), _refund_write("re_MINTED2")],
@@ -284,9 +287,7 @@ def test_a_cursor_naming_a_real_refund_is_partial_and_unchanged():
 
 def test_the_page_after_a_minted_refund_is_unchanged_and_fully_modelled():
     out = apply_read(
-        _asked(
-            "refunds.list", "/v1/refunds", headers=[("irimi-rewrote", "starting_after=re_MINTED1")]
-        ),
+        _asked("refunds.list", "/v1/refunds", translated_from="starting_after=re_MINTED1"),
         _refunds_page("re_REAL1"),
         [_refund_write()],
     )
@@ -296,8 +297,7 @@ def test_the_page_after_a_minted_refund_is_unchanged_and_fully_modelled():
 
 
 def test_the_page_after_a_minted_refund_with_an_older_one_behind_it_is_partial():
-    """re_MINTED2 is newer, so page 1 at `limit=1` held only it; the page after it should start
-    with re_MINTED1, which the real list from its top does not carry."""
+    """The page after a minted refund is partial when an older minted refund belongs on it."""
     page = _refunds_page("re_REAL1")
     before = copy.deepcopy(page)
     out = apply_read(
@@ -305,7 +305,7 @@ def test_the_page_after_a_minted_refund_with_an_older_one_behind_it_is_partial()
             "refunds.list",
             "/v1/refunds",
             query="limit=1",
-            headers=[("irimi-rewrote", "starting_after=re_MINTED2")],
+            translated_from="starting_after=re_MINTED2",
         ),
         page,
         [_refund_write("re_MINTED1"), _refund_write("re_MINTED2")],
@@ -340,9 +340,9 @@ def test_expand_is_a_known_list_filter():
 
 
 def test_retrieving_a_minted_refund_is_answered_from_the_write_log():
-    """#52's Stripe half. Stripe has never heard of the id and answers `404 resource_missing`; the
-    agent asked for an object irimi told it exists, so the answer is that object, at 200. This is
-    the one read where the effects replace a STATUS as well as a body."""
+    """A read of a minted refund is answered with that refund at 200, over Stripe's 404.
+
+    This is the one read where the effects replace the status as well as the body."""
     error = {
         "error": {
             "code": "resource_missing",
@@ -357,11 +357,9 @@ def test_retrieving_a_minted_refund_is_answered_from_the_write_log():
     assert out.changed is True
     assert out.partial is False
     assert out.document == write.answer
-    # A copy, so a later effect cannot find the write log's own object edited by the serializer's
-    # caller. The values are equal and the objects are not.
+    # A copy, so a caller's edits never reach the write log's object.
     assert out.document is not write.answer
-    # And the copy is what a caller may edit: the log's refund, and the next read of it, keep the
-    # values irimi answered the write with.
+    # After an edit, the log's refund and the next read of it keep the values irimi answered.
     before = copy.deepcopy(write.answer)
     out.document["amount"] = 0
     out.document["status"] = "failed"
@@ -371,8 +369,7 @@ def test_retrieving_a_minted_refund_is_answered_from_the_write_log():
 
 
 def test_a_minted_refund_is_answered_over_whatever_stripe_said():
-    """Not only over a 404: a 24-character random id colliding with a real refund is not a
-    scenario, and the object the agent asked for is the one irimi minted (#52)."""
+    """A minted refund is answered over any object Stripe returns: the id cannot be a real one."""
     write = _refund_write()
     other = {"id": "re_MINTED1", "object": "refund", "amount": 1, "charge": "ch_SOMEONE_ELSE"}
     out = apply_read(_asked("refunds.retrieve", "/v1/refunds/re_MINTED1"), other, [write])
@@ -389,10 +386,9 @@ def test_a_minted_refund_is_answered_over_whatever_stripe_said():
     ],
 )
 def test_a_minted_refund_read_that_stripe_refused_for_another_reason_is_not_answered(error):
-    """Whatever Stripe said about the OBJECT - but a 429, a 401 or a 5xx is about the caller or
-    Stripe itself, and production would have sent it for the real refund too. Answering 200 over
-    it would turn an error into a success, so the body stands and the read is `partial`, the
-    pre-#52 answer (#52)."""
+    """A 429, 401 or 5xx on a minted refund's read stands, flagged partial, never turned into 200.
+
+    Those errors are about the caller or Stripe, and the real refund would have got them too."""
     body = {"error": error}
     out = apply_read(_asked("refunds.retrieve", "/v1/refunds/re_MINTED1"), body, [_refund_write()])
     assert out.document == body
@@ -408,7 +404,7 @@ def test_retrieving_a_real_refund_is_untouched():
     assert out.partial is False
     assert out.changed is False
     assert out.document == before
-    assert out.status is None  # the service's own status stands (#52)
+    assert out.status is None  # the service's own status stands
 
 
 # ------------------------------------------------------------------------------ the customer

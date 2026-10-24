@@ -1,7 +1,7 @@
 [project]
 name = "irimi"
 version = "0.1.0"
-description = "Shadow mode for AI agents: reads are real, writes are virtual, and reads see the writes."
+description = "Shadow mode for AI agents: reads are real, writes are faked, and reads see the writes."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -14,19 +14,24 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "Topic :: Software Development :: Testing",
     "Topic :: Internet :: Proxy Servers",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
 ]
 requires-python = ">=3.12" # floor for end users; development pins 3.14 via .python-version
 dependencies = [
     "cryptography>=42",
     # >=12 because `IrimiAddon.request` is a coroutine hook, and only 12's addonmanager awaits one
-    # (`inspect.iscoroutinefunction` in `invoke_addon`). On 11 the decision would never run (#45).
-    "mitmproxy>=12",
-    # Imported directly to decode a body incrementally, up to a cap (#94). mitmproxy depends on both;
+    # (`inspect.iscoroutinefunction` in `invoke_addon`). On 11 the decision would never run.
+    # <13 because the addon depends on mitmproxy's hook internals. 12.2.1 is the lowest 12 that
+    # resolves with the other floors.
+    "mitmproxy>=12.2.1,<13",
+    # Imported directly to decode a body incrementally, up to a cap. mitmproxy depends on both;
     # >=1.2 because only 1.2's `Decompressor.process` takes `output_buffer_limit`.
     "brotli>=1.2",
     "pyyaml>=6",
@@ -40,41 +45,81 @@ irimi = "irimi.cli:main"
 Homepage = "https://github.com/HenryLiu714/Irimi"
 Source = "https://github.com/HenryLiu714/Irimi"
 Issues = "https://github.com/HenryLiu714/Irimi/issues"
+Documentation = "https://github.com/HenryLiu714/Irimi#readme"
+Changelog = "https://github.com/HenryLiu714/Irimi/blob/main/CHANGELOG.md"
 
 [dependency-groups]
-# `uv sync` installs `dev` by default. `examples` is opt-in: `uv sync --group examples`.
-dev = [
-    "httpx>=0.28.1",
-    "mypy>=1.11",
-    "pytest>=8",
-    "requests>=2.34.2",
-    "ruff>=0.6",
-    "types-pyyaml>=6",
+# `uv sync` installs `dev`, which is `lint` plus `test`. `examples` is opt-in:
+# `uv sync --group examples`. Each floor is the minor version uv.lock holds; the weekly
+# dependencies workflow tests the floors and the newest releases.
+lint = [
+    "mypy>=2.3",
+    "ruff>=0.16",
+    "types-pyyaml>=6.0",
+]
+test = [
+    # patch = ["subprocess"] below needs coverage 7.10; pytest-cov 7.0 leaves subprocesses to it.
+    "coverage>=7.10",
+    "pytest>=9.1",
+    "pytest-cov>=7.0",
+    "pytest-timeout>=2.4",
+    "pytest-xdist>=3.8",
+    # The HTTP clients and service SDKs the tests and the workflow agents drive.
+    "anthropic>=2.2",
+    "httpx>=0.28",
+    "requests>=2.34",
+    "slack-sdk>=3.44",
+    "stripe>=15.6",
 ]
 examples = [
-    "slack-sdk>=3",
-    "stripe>=10",
+    "anthropic>=2.2",
+    "slack-sdk>=3.44",
+    "stripe>=15.6",
+]
+dev = [
+    { include-group = "lint" },
+    { include-group = "test" },
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27,<2"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/irimi"]
 
-# The sdist is what a wheel builds from, nothing more: no tests, examples, CI or agent settings (#169).
+# The sdist is what a wheel builds from, nothing more: no tests, examples, CI or agent settings.
 [tool.hatch.build.targets.sdist]
 include = ["/src/irimi", "/README.md", "/LICENSE", "/pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A live test calls a real service, so a key exported in the shell must not make a plain run do it.
+addopts = ["-ra", "--strict-markers", "-m", "not live"]
+# A hung engine thread or child process fails its test instead of holding the job.
+timeout = 120
+markers = [
+    "live: calls a real service with your keys; run with `uv run pytest -m live`",
+    "e2e: drives the real `irimi` command end to end; `make test-fast` leaves these out",
+    "slow: takes seconds rather than milliseconds",
+]
 filterwarnings = [
     # mitmproxy's flow filter still calls pyparsing's pre-3.0 names; nothing in irimi does.
     "ignore:.*deprecated.*:DeprecationWarning:mitmproxy",
     "ignore:.*deprecated.*:DeprecationWarning:pyparsing",
     "ignore:.*deprecated.*:DeprecationWarning:ldap3",
 ]
+
+[tool.coverage.run]
+source = ["irimi"]
+branch = true
+# Most end-to-end tests run irimi in a child process (`irimi shadow`, the replay child).
+patch = ["subprocess"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "@overload", "raise NotImplementedError"]
 
 [tool.ruff]
 line-length = 100
@@ -83,14 +128,74 @@ extend-exclude = [".claude"]
 
 [tool.ruff.lint]
 # E/F/I/UP: errors, pyflakes, import order, modern syntax. B: bugbear's likely-bug patterns.
-# C4: comprehension hygiene.
-select = ["E", "F", "I", "UP", "B", "C4"]
+# C4, SIM, RUF: comprehension hygiene, simpler forms, ruff's own checks. PT: pytest style.
+# PLC0415: imports at the top, so the few lazy ones carry a reason. PLR1714, PLW: pylint's
+# likely bugs. S: bandit's security checks. D2, D4: docstring summary lines (CONTRIBUTING.md).
+select = [
+    "E", "F", "I", "UP", "B", "C4", "SIM", "RUF", "PT", "PLC0415", "PLR1714", "PLW", "S", "D2",
+    "D4",
+]
+ignore = [
+    # The docstring style: the summary starts on the first line, a class docstring has no blank
+    # line above it, the closing quotes end the last line, and a section needs no blank line after.
+    "D203", "D209", "D213", "D413",
+    # D400 wants a period; D415 also accepts `?` and `!`. A summary may open with a lower-case
+    # name: irimi, argparse, mitmproxy.
+    "D400", "D403",
+    # An assert narrows a type mypy cannot follow; none guards input, so `-O` loses no check.
+    "S101",
+    # A hook and the SDK never raise, so an exception neither can act on is dropped on purpose.
+    "S110", "S112",
+    # Running the command the user typed is what `irimi shadow` is for.
+    "S603",
+    # `assert a and b` reads as one fact, and pytest's report shows which side failed.
+    "PT018",
+]
+flake8-bugbear.extend-immutable-calls = [
+    "irimi.core.exchange.Precondition", "irimi.core.exchange.WriteOutcome",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# A test imports where it needs the name, often after a monkeypatch, and its credentials, binds,
+# temp paths and subprocesses are fixtures.
+"tests/**" = [
+    "PLC0415", "S102", "S104", "S105", "S106", "S108", "S301", "S311", "S607",
+    # A fake service keeps its request log on the class, which every handler instance shares.
+    "RUF012",
+    # An expected row is split across lines with `+` where it is too long for one.
+    "RUF005",
+    # A test string holds a look-alike character on purpose, to check irimi escapes it.
+    "RUF001",
+    # A test names a staticmethod's first parameter `self` or `cls` to check nothing binds it.
+    "PLW0211",
+    # A test's docstring states the property it checks, not a command.
+    "D401",
+]
+# The example agents call the URLs their configuration names, through urllib.
+"examples/**" = ["S310"]
+"tests/e2e/workflows/agents/**" = ["S310"]
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src"]
-strict_optional = true
-check_untyped_defs = true
-warn_unused_ignores = true
-warn_redundant_casts = true
-no_implicit_reexport = false
+files = ["src", "examples", "tests"]
+mypy_path = "src"
+explicit_package_bases = true
+strict = true
+enable_error_code = ["ignore-without-code"]
+# mitmproxy's own API is partly unannotated; calling it is still checked against what it declares.
+untyped_calls_exclude = ["mitmproxy"]
+
+[[tool.mypy.overrides]]
+module = ["brotli"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Tests check behaviour, not signatures: a test function, fixture or helper may go unannotated,
+# and a bare `dict` or an `Any` return is fine in one.
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+disallow_any_generics = false
+warn_return_any = false

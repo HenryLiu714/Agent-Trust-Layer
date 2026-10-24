@@ -1,0 +1,59 @@
+# The sidecar app beside `irimi serve`, in two containers, as in production; see README.md.
+services:
+  irimi:
+    build:
+      context: ../..
+      dockerfile: examples/sidecar/Dockerfile.irimi
+    # The agent container gets `ca.pem` and nothing else: never `ca.key` or the `mitm/` bundle,
+    # which hold the key (`runner.child_env`'s rule). Port 4000 is not published: the control
+    # endpoint has no authentication, so only this network reaches it.
+    command:
+      - sh
+      - -c
+      - irimi init && cp /irimi-home/ca/ca.pem /ca/ca.pem && exec irimi serve --bind 0.0.0.0 --port 4000
+    volumes:
+      - irimi-home:/irimi-home
+      - ca-public:/ca
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/_irimi/health', timeout=2)"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: examples/sidecar/Dockerfile.agent
+    # The app installs no SIGTERM handler; as PID 1 it would ignore one and be killed after 10 s.
+    init: true
+    depends_on:
+      irimi:
+        condition: service_healthy
+    # The README's "Serve mode" variables, naming irimi as the agent reaches it, and never
+    # IRIMI_RUN: a request outside any run is `unattributed`.
+    environment:
+      HTTPS_PROXY: http://irimi:4000
+      HTTP_PROXY: http://irimi:4000
+      https_proxy: http://irimi:4000
+      http_proxy: http://irimi:4000
+      SSL_CERT_FILE: /ca/ca.pem
+      REQUESTS_CA_BUNDLE: /ca/ca.pem
+      IRIMI_ENGINE_ACTIVE: "1"
+      IRIMI_CONTROL: http://irimi:4000/_irimi
+      STRIPE_API_KEY: ${STRIPE_API_KEY:?set STRIPE_API_KEY to a Stripe test-mode key}
+      HOST: 0.0.0.0
+      PORT: "8080"
+    volumes:
+      - ca-public:/ca:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    # Straight to the app, not through the proxy its environment names.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.build_opener(u.ProxyHandler({})).open('http://127.0.0.1:8080/healthz', timeout=2)"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+volumes:
+  irimi-home:
+  ca-public:

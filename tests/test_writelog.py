@@ -1,9 +1,16 @@
-"""`writelog`: the run's faked writes, decoded for the overlay and the policy alike (#45)"""
+"""`writelog`: the run's faked writes, decoded for the overlay and the policy alike."""
 
 import json
+from dataclasses import replace
 
-from irimi import bodies, writelog
-from irimi.exchange import Exchange, Request, Response
+import pytest
+
+from irimi.core import bodies
+from irimi.core.exchange import Exchange, Response
+from irimi.core.limits import MAX_BODY_BYTES
+from irimi.decide import writelog
+from irimi.protocol.trace import UNATTRIBUTED
+from tests.support import builders
 
 ANSWER = {
     "id": "re_MINTED1",
@@ -15,16 +22,7 @@ ANSWER = {
 
 
 def _request(host="api.stripe.com", path="/v1/refunds", method="POST", headers=(), body=b""):
-    return Request(
-        method=method,
-        scheme="https",
-        host=host,
-        port=443,
-        path=path,
-        query="",
-        headers=tuple(headers),
-        body=body,
-    )
+    return builders.request(method=method, host=host, path=path, headers=tuple(headers), body=body)
 
 
 def _read(headers=()):
@@ -44,7 +42,6 @@ def _write(service="stripe", headers=(), body=None, response=True):
         operation="refunds.create",
         kind="write",
         answered_by="fake-L1",
-        validation="unvalidated",
         run_id="7f3a",
     )
 
@@ -72,21 +69,86 @@ def test_a_write_with_no_response_or_a_body_that_is_not_a_json_object_is_skipped
 
 
 def test_scoped_writes_is_none_without_a_table_entry_or_a_write():
-    table = {"stripe": "entry"}
-    assert writelog.scoped_writes(table, "slack", _read(), [_write()]) is None
-    assert writelog.scoped_writes(table, "stripe", _read(), []) is None
+    assert writelog.scoped_writes(None, "slack", _read(), [_write()]) is None
+    assert writelog.scoped_writes("entry", "stripe", _read(), []) is None
 
 
 def test_scoped_writes_returns_the_entry_and_the_decoded_writes():
     ex = _write()
     writes = writelog.decode("stripe", _read(), [ex])
-    assert writelog.scoped_writes({"stripe": "entry"}, "stripe", _read(), [ex]) == (
+    assert writelog.scoped_writes("entry", "stripe", _read(), [ex]) == (
         "entry",
         writes,
     )
 
 
+def test_a_run_sees_its_own_writes_and_no_other_run_s():
+    """Each run reads back its own faked writes in order; a run with none gets an empty tuple."""
+    log = writelog.WriteLog()
+    a1, b1, a2 = (replace(_write(), run_id=run) for run in ("run-a", "run-b", "run-a"))
+    for ex in (a1, b1, a2):
+        log.add(ex)
+    assert log.for_run("run-a") == (a1, a2)
+    assert log.for_run("run-b") == (b1,)
+    assert log.for_run("run-c") == ()
+
+
+def test_requests_no_run_names_form_a_log_of_their_own():
+    log = writelog.WriteLog()
+    lost, named = replace(_write(), run_id=UNATTRIBUTED), _write()
+    log.add(lost)
+    log.add(named)
+    assert log.for_run(UNATTRIBUTED) == (lost,)
+    assert log.for_run(named.run_id) == (named,)
+
+
+def test_ending_a_run_drops_its_writes_and_no_other_run_s():
+    log = writelog.WriteLog()
+    a, b = (replace(_write(), run_id=run) for run in ("run-a", "run-b"))
+    log.add(a)
+    log.add(b)
+    log.end_run("run-a")
+    log.end_run("never-started")
+    assert log.for_run("run-a") == ()
+    assert log.for_run("run-b") == (b,)
+
+
+def test_a_run_s_writes_already_read_do_not_change_when_it_adds_more():
+    """A tuple of a run's writes never changes after it is read.
+
+    The engine reads it on its event loop and hands it to a worker thread."""
+    log = writelog.WriteLog()
+    first = _write()
+    log.add(first)
+    seen = log.for_run(first.run_id)
+    log.add(_write())
+    assert seen == (first,)
+    assert len(log.for_run(first.run_id)) == 2
+
+
 def test_a_body_over_the_size_cap_is_not_a_json_object():
-    padded = json.dumps({"description": "x" * bodies.MAX_BODY_BYTES}).encode()
+    padded = json.dumps({"description": "x" * MAX_BODY_BYTES}).encode()
     assert bodies.json_object(padded) is None
     assert bodies.json_object(b'{"ok": true}') == {"ok": True}
+
+
+def test_a_write_sent_after_its_run_ended_is_filed_under_no_run():
+    log = writelog.WriteLog()
+    write = _write()
+    log.add(write)
+    log.end_run(write.run_id)
+    log.add(write)
+    assert log.for_run(write.run_id) == ()
+    other = replace(_write(), run_id="run-b")
+    log.add(other)
+    assert log.for_run("run-b") == (other,)
+
+
+def test_the_ended_runs_remembered_are_bounded_newest_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(writelog, "MAX_ENDED_RUNS", 3)
+    ended = writelog.EndedRuns()
+    for run_id in ("a", "b", "c", "a", "d"):
+        ended.add(run_id)
+    assert [run_id in ended for run_id in "abcd"] == [True, False, True, True]

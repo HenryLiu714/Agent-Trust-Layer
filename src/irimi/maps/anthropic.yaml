@@ -1,6 +1,6 @@
 # Anthropic. `llm` is a route kind here, never a host default: on an LLM host only the inference
-# routes are `llm`, and everything else on api.anthropic.com is a real, billable write (design
-# §4.3). `default_kind: llm` is refused by the loader for exactly that reason.
+# routes are `llm`, because everything else on api.anthropic.com may be a real, billable write.
+# `default_kind: llm` is refused by the loader for exactly that reason.
 #
 # Deliberately unlisted, so the RFC fallback makes them `unknown` + `unclassified` and irimi answers
 # them locally: /v1/files and /v1/messages/batches. Uploading a file or starting a batch costs money
@@ -10,9 +10,12 @@
 # containing `{`, so `match: {method: GET, path: /v1/models/{model}}` is a parse error.
 version: 1
 service: anthropic
-verbs: honest # Anthropic reads are GETs, so the HTTP method carries information here
+style: rest # Anthropic reads are GETs, so the HTTP method carries information here
 hosts:
   - api.anthropic.com
+# `compare_ignores:` on each inference route names the top-level body fields that say who asked
+# and how the answer travels, never what was asked. A replay matches a call without them, and
+# `irimi compare` ignores them.
 routes:
   - match:
       method: POST
@@ -20,6 +23,7 @@ routes:
     operation: messages.create
     kind: llm
     human: message with {model}
+    compare_ignores: [metadata, user, stream, stream_options, prompt_cache_key]
 
   - match:
       method: POST
@@ -27,3 +31,4 @@ routes:
     operation: messages.count_tokens
     kind: llm
     human: count tokens for {model}
+    compare_ignores: [metadata, user, stream, stream_options, prompt_cache_key]

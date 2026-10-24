@@ -1,24 +1,25 @@
 # Slack's Web API. Its SDKs send every call as POST, so the HTTP method says nothing about what a
 # call does and the operation is the path's method name (`/api/chat.postMessage`). That is what
-# `verbs: post-only` means: the loader's "a read on an unsafe method is a downgraded write" rule
-# does not apply here, because there is no honest verb to downgrade from.
+# `style: rpc` means: the loader's "a read on an unsafe method is a downgraded write" rule does not
+# apply here, because there is no honest verb to downgrade from.
 #
 # hooks.slack.com (incoming webhooks) is here, under the same service name, because the URL itself
 # is the credential: `/services/{team}/{bot}/{token}` carries the secret in the path. So do
-# `/workflows/...` and `/triggers/...`, which this map does not list - which is why the rule is
-# keyed on the HOST (`servicemap.CREDENTIAL_PATH_HOSTS`) and not on this route. Every target of
-# this service must be loopback, with no `--allow-target-host` escape; keying it on the route let
-# a service-level target delegate every unlisted path off the machine.
+# `/workflows/...` and `/triggers/...`, which this map does not list, so the rule is keyed on the
+# host, not on this route: `credential_path_hosts:` makes every target of this service loopback
+# only, with no `--allow-remote-target` escape, and keeps every path on the host off disk as sent.
 #
 # Quote any `human:` template containing `#`. An unquoted `#` preceded by a space starts a YAML
 # comment, which silently truncates the template at the channel name.
 version: 1
 service: slack
-verbs: post-only
+style: rpc
 hosts:
   - slack.com
-  - files.slack.com # file downloads; no routes yet, but the reverse door may reach it
+  - files.slack.com # file downloads; no routes yet, but base-URL mode may reach it
   - hooks.slack.com # incoming webhooks; the URL is the credential
+credential_path_hosts:
+  - hooks.slack.com
 routes:
   - match:
       method: POST
@@ -26,12 +27,12 @@ routes:
     operation: chat.postMessage
     kind: write
     human: 'post to #{channel}: "{text}"'
-    # The L1 payload. It nests under `message:` inside Slack's own envelope; `ok`, `channel` and
-    # `ts` stay envelope-owned, and `ts` is minted rather than taken from here (#42). See
-    # echo.slack.SLACK_ENVELOPES.
+    # The response object a faked post starts from. It nests under `message:` inside Slack's own
+    # envelope; `ok`, `channel` and `ts` belong to the envelope, and `ts` is minted for each post
+    # rather than taken from here.
     fixture: message
-    # `conversations.info` on the channel, before the post is faked (#45). Only a channel spelled
-    # as an id is checked; see services/slack.py.
+    # `conversations.info` on the channel, before the post is faked. Only a channel spelled
+    # as an id is checked.
     precondition: channel_postable
 
   - match:
@@ -49,8 +50,8 @@ routes:
     human: upload {filename} to {channels}
     # No `fixture:`. Slack retired files.upload in March 2025 and slack_sdk uploads through
     # files.getUploadURLExternal instead, so faking the `file` object here would fake a method
-    # nothing calls. The route stays mapped so the call is still named and still never forwarded,
-    # and echo.slack.SLACK_ENVELOPES still knows the bare `{ok}` it answers with (#42).
+    # nothing calls. The route stays mapped so the call is still named and never forwarded, and is
+    # answered with Slack's bare `{ok}` envelope.
 
   - match:
       method: POST
@@ -58,9 +59,8 @@ routes:
     operation: incoming_webhook
     kind: write
     human: 'post via webhook: "{text}"'
-    # The webhook URL is the credential. The rule that keeps it local lives on the host, not on
-    # this route: see CREDENTIAL_PATH_HOSTS. Listing the route here is what names the operation.
-    comment: the URL is the credential; never forwarded, never allow-listed
+    # The webhook URL is the credential: never forwarded, never allow-listed. The rule that keeps
+    # it local lives on the host (`credential_path_hosts:`); listing the route names the operation.
 
   - match:
       method: POST

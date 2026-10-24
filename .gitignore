@@ -8,6 +8,9 @@ build/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # Local config and secrets
 .env
@@ -19,12 +22,10 @@ build/
 # irimi state if someone points IRIMI_HOME at the repo
 .irimi/
 
-# The LLM refund agent's own database, made by its live half in the repo root (#85)
+# The replay example's own database, made in the working directory when it runs for real
 /llm_refunds.sqlite3*
 
-# Claude Code: agent worktrees and per-user settings
-.claude/worktrees/
-.claude/settings.local.json
+.claude/*
 
 # Editors and OS
 .vscode/

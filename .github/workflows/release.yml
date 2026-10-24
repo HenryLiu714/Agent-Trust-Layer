@@ -1,9 +1,12 @@
 name: release
 
-# Publishes irimi to PyPI when a `v<version>` tag is pushed (#169). It uses PyPI Trusted
-# Publishing: PyPI trusts this workflow's OIDC token, so no API token exists anywhere. The
-# publisher on PyPI names this repository, this file and the `pypi` environment; renaming any of
-# them breaks publishing until the publisher is updated to match.
+# Publishes irimi to PyPI when a `v<version>` tag is pushed. It uses PyPI Trusted Publishing:
+# PyPI trusts this workflow's OIDC token, so no API token exists anywhere. The publisher on PyPI
+# names this repository, this file and the `pypi` environment; renaming any of them breaks
+# publishing until the publisher is updated to match.
+#
+# Order: the full CI suite and the build run first; only then does `publish` get an OIDC token,
+# and `github-release` attaches the same files with the CHANGELOG section as notes.
 
 on:
   push:
@@ -12,15 +15,27 @@ on:
 permissions:
   contents: read
 
+# A release is never cancelled halfway: a second push of the same tag waits for the first.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  publish:
-    runs-on: ubuntu-latest
-    environment: pypi
+  test:
     permissions:
-      id-token: write
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The whole history and every branch, so the ancestry check can see origin/main.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       # A tag that disagrees with pyproject.toml would publish a version nobody tagged.
       - name: Tag matches the package version
         run: |
@@ -29,6 +44,81 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match pyproject.toml version $version" >&2
             exit 1
           fi
+      # A tag on an unmerged branch would publish code that main never reviewed.
+      - name: Tagged commit is on main
+        run: |
+          commit=$(git rev-parse "$GITHUB_SHA^{commit}")
+          if ! git merge-base --is-ancestor "$commit" origin/main; then
+            echo "tag $GITHUB_REF_NAME points at $commit, which is not on origin/main" >&2
+            exit 1
+          fi
+      # Checked before anything is published, so a release never goes out without notes.
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## / {
+              if (found) exit
+              if (index($0, "[" v "]") == 4 || $2 == v) { found = 1; next }
+            }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "CHANGELOG.md has no section for $version" >&2
+            exit 1
+          fi
       - run: uv build
       - run: uvx twine check --strict dist/*
-      - run: uv publish --trusted-publishing always
+      - name: Smoke-test the wheel in a clean 3.12 venv
+        run: scripts/smoke-test-wheel.sh dist/*.whl "${GITHUB_REF_NAME#v}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+  publish:
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      # PEP 740 attestations let anyone check on PyPI that a file was built by this workflow.
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          attestations: true
+
+  github-release:
+    needs: [publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "irimi ${GITHUB_REF_NAME#v}" \
+            --notes-file release-notes.md

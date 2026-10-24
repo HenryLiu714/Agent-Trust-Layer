@@ -1,0 +1,490 @@
+"""The fake internet: one loopback server answering for every host a sample workflow calls.
+
+Agents call real host names, so irimi uses its shipped maps; only name resolution is fake."""
+
+from __future__ import annotations
+
+import contextlib
+import functools
+import ipaddress
+import json
+import socket
+import struct
+import threading
+import time
+import zlib
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Protocol
+from urllib.parse import parse_qsl, urlsplit
+
+import brotli
+import zstandard
+
+from tests.e2e.workflows.agents import agentkit, credentials
+
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# How long a `stall` fault holds a request before answering. Agents under test use a shorter
+# client timeout, so a stall reads to them as a timeout.
+STALL_S = 2.0
+# How long the second of two `-paired` requests is answered after the first.
+PAIR_GAP_S = 0.2
+# How long `reset-stream` waits between its first chunk and the reset.
+RESET_AFTER_CHUNK_S = 0.5
+# The longest a held stream (`Resp.hold`) waits, so a release that never comes fails, not hangs.
+HOLD_TIMEOUT_S = 30.0
+# The listen backlog. socketserver's default of 5 drops connections from W3's concurrent runs on
+# macOS, where a dropped SYN is retried a second later and reads as a flaky timeout.
+BACKLOG = 128
+# What a bomb fault decodes to: `BOMB_HEAD`, then a GiB of 16-byte lines, far past irimi's decoding
+# cap. Short lines keep redaction cheap. A scenario builds its bomb in `setup`, because building it
+# on the request takes longer than the agent's timeout.
+BOMB_DECODED_BYTES = 1024 * 1024 * 1024
+BOMB_LINE = b" " * 15 + b"\n"
+# A served canary (`invariants.SERVED_CANARIES`): a body irimi decodes only in part is still
+# recorded, and must reach disk redacted or not at all.
+BOMB_SECRET = credentials.BOMB_SECRET
+# How every bomb starts: a JSON document with its credential on a line of its own, which only its
+# key marks as a secret, since redaction reads a cut document line by line.
+BOMB_HEAD = b'{\n  "object": "export",\n  "client_secret": "' + BOMB_SECRET.encode() + b'",\n'
+# What `gzip-padded` puts after the service's answer: 128 MiB of blanks, which JSON ignores.
+PADDED_LINE = b" "
+PADDED_BYTES = 128 * 1024 * 1024
+# The answers a bomb fault gives, by its action: the `Content-Encoding` each is sent in.
+BOMB_ENCODINGS = {"gzip-bomb": "gzip", "br-bomb": "br", "zstd-bomb": "zstd"}
+# The most a fake service decodes of a gzip request body; past it the request is refused 413, so
+# an agent's own bomb never costs the harness more than this.
+MAX_REQUEST_DECODED = 16 * 1024 * 1024
+
+
+@functools.cache
+def bomb(encoding: str) -> bytes:
+    """Return `BOMB_HEAD` plus `BOMB_DECODED_BYTES` of `BOMB_LINE`, compressed in `encoding`."""
+    if encoding == "gzip":
+        return agentkit.gzip_bomb(BOMB_HEAD, BOMB_LINE, BOMB_DECODED_BYTES)
+    block = BOMB_LINE * (1024 * 1024 // len(BOMB_LINE))
+    blocks = BOMB_DECODED_BYTES // len(block)
+    if encoding == "br":
+        compressor = brotli.Compressor(quality=5)
+        parts = [compressor.process(BOMB_HEAD)] + [compressor.process(block) for _ in range(blocks)]
+        return b"".join([*parts, compressor.finish()])
+    if encoding == "zstd":
+        zstd = zstandard.ZstdCompressor(level=3).compressobj()
+        parts = [zstd.compress(BOMB_HEAD)] + [zstd.compress(block) for _ in range(blocks)]
+        return b"".join([*parts, zstd.flush()])
+    raise ValueError(f"no bomb in {encoding!r}")
+
+
+@dataclass(frozen=True)
+class Req:
+    """One request as the fake internet received it."""
+
+    method: str
+    host: str
+    path: str
+    query: dict[str, str]
+    headers: dict[str, str]  # names lower-cased
+    body: bytes  # as sent, before any content-encoding is undone
+    via_proxy: bool  # arrived in absolute form, i.e. from a bare run through HTTP_PROXY
+
+    @functools.cached_property
+    def decoded(self) -> bytes | None:
+        """Return the body with its gzip undone, or None past MAX_REQUEST_DECODED.
+
+        A gzip body that does not decode reads as empty."""
+        if self.headers.get("content-encoding") != "gzip":
+            return self.body
+        inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        try:
+            out = inflater.decompress(self.body, MAX_REQUEST_DECODED)
+            if inflater.unconsumed_tail and inflater.decompress(inflater.unconsumed_tail, 1):
+                return None
+            return out + inflater.flush() if inflater.eof else b""
+        except zlib.error:
+            return b""
+
+    def too_big(self) -> bool:
+        """Return whether the body decodes past MAX_REQUEST_DECODED, which is refused 413."""
+        return self.decoded is None
+
+    def text(self) -> str:
+        return (self.decoded or b"").decode("utf-8", "replace")
+
+    def json(self) -> Any:
+        try:
+            return json.loads(self.text())
+        except ValueError:
+            return None
+
+    def params(self) -> dict[str, Any]:
+        """Return the query plus the body's fields, JSON or form, flat; Slack takes either body."""
+        out: dict[str, Any] = dict(self.query)
+        doc = self.json()
+        if isinstance(doc, dict):
+            out.update(doc)
+        elif self.body:
+            out.update(parse_qsl(self.text(), keep_blank_values=True))
+        return out
+
+
+@dataclass
+class Resp:
+    """What a service answers. `body` is JSON for a dict or list, text for a str."""
+
+    status: int = 200
+    body: Any = None
+    headers: dict[str, str] = field(default_factory=dict)
+    # A streamed answer: each chunk is written and flushed on its own, `chunk_delay` apart, framed
+    # with chunked transfer encoding as a real LLM API frames one.
+    chunks: list[bytes] | None = None
+    chunk_delay: float = 0.0
+    # A stream whose last chunk waits for this, up to HOLD_TIMEOUT_S, so a scenario can end it
+    # after something the agent does (W7 `hand_off`).
+    hold: threading.Event | None = None
+
+
+class Service(Protocol):
+    """A fake service: its hosts, its answers, and which of its requests are writes.
+
+    `is_write` is the service's own truth, not irimi's: a Slack read and an LLM call are POSTs."""
+
+    hosts: tuple[str, ...]
+
+    def handle(self, req: Req) -> Resp: ...
+
+    def is_write(self, req: Req) -> bool: ...
+
+
+@dataclass
+class Fault:
+    """Answer the next `times` matching requests with `action` instead of the service.
+
+    `401`, `429`, `500` and `garbage` answer at once, and `503-json` with an empty JSON object;
+    `stall` answers late; `reset` resets before any response; `reset-stream` resets after the
+    first chunk; `*-bomb` answers with `bomb()`; `gzip-padded` gzips the service's answer followed
+    by `PADDED_BYTES` of blanks. An action ending in `-paired` waits, up to `STALL_S`, for a second
+    such request, then answers, first come first. A faulted request is still recorded in `log`."""
+
+    host: str
+    action: str
+    match: Callable[[Req], bool] = lambda req: True
+    times: int = 1
+
+
+def json_error(status: int, **fields: Any) -> Resp:
+    return Resp(status, fields)
+
+
+class FakeInternet:
+    def __init__(self, services: list[Service]) -> None:
+        self.services: dict[str, Service] = {}
+        for service in services:
+            for host in service.hosts:
+                self.services[host.lower()] = service
+        self.log: list[Req] = []
+        # Every body a `gzip-padded` fault sent, as it went on the wire.
+        self.padded: list[bytes] = []
+        self.faults: list[Fault] = []
+        self._lock = threading.Lock()
+        # Where `-paired` faults wait for each other.
+        self._pair = threading.Barrier(2, timeout=STALL_S)
+        self._server: ThreadingHTTPServer | None = None
+
+    # -- lifecycle -------------------------------------------------------------------------
+
+    def start(self) -> int:
+        internet = self
+
+        class Handler(_Handler):
+            owner = internet
+
+        self._server = _Server(("127.0.0.1", 0), Handler)
+        server = self._server
+        threading.Thread(
+            target=lambda: server.serve_forever(poll_interval=0.01), daemon=True
+        ).start()
+        return self.port
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+
+    @property
+    def port(self) -> int:
+        assert self._server is not None, "the fake internet is not started"
+        return int(self._server.server_address[1])
+
+    def base(self, host: str) -> str:
+        """Return the base URL an agent is given for `host`: the real name, this server's port."""
+        return f"http://{host}:{self.port}"
+
+    def resolving(self) -> contextlib.AbstractContextManager[None]:
+        """Resolve this fake internet's hosts to loopback and refuse every other name."""
+        return resolving_only(self.services)
+
+    # -- what happened ---------------------------------------------------------------------
+
+    def inject(
+        self,
+        host: str,
+        action: str,
+        match: Callable[[Req], bool] = lambda req: True,
+        times: int = 1,
+    ) -> None:
+        self.faults.append(Fault(host.lower(), action, match, times))
+
+    def requests(self, host: str | None = None) -> list[Req]:
+        with self._lock:
+            return [r for r in self.log if host is None or r.host == host]
+
+    def writes(self) -> list[Req]:
+        """Return every request its service counts as a write, and unsafe ones to unserved hosts."""
+        with self._lock:
+            log = list(self.log)
+        return [r for r in log if self._is_write(r)]
+
+    def _is_write(self, req: Req) -> bool:
+        service = self.services.get(req.host)
+        return req.method not in SAFE_METHODS if service is None else service.is_write(req)
+
+    # -- serving ---------------------------------------------------------------------------
+
+    def _take_fault(self, req: Req) -> Fault | None:
+        with self._lock:
+            self.log.append(req)
+            for fault in self.faults:
+                if fault.host == req.host and fault.times > 0 and fault.match(req):
+                    fault.times -= 1
+                    return fault
+        return None
+
+    def answer(self, req: Req) -> tuple[Resp | None, str | None]:
+        fault = self._take_fault(req)
+        action = fault.action if fault is not None else None
+        if action is not None and action.endswith("-paired"):
+            # Answered only once the other `-paired` request has arrived too, so both are in the
+            # air at once; then in the order they arrived, PAIR_GAP_S apart, as the action.
+            with contextlib.suppress(threading.BrokenBarrierError):
+                time.sleep(PAIR_GAP_S * self._pair.wait())
+            action = action.removesuffix("-paired")
+        if action == "401":
+            return json_error(401, error={"type": "invalid_request_error"}), None
+        if action == "429":
+            return json_error(429, error={"type": "rate_limit_error"}), None
+        if action == "500":
+            return json_error(500, error={"type": "api_error"}), None
+        if action == "503-json":
+            return Resp(503, {}), None
+        if action == "garbage":
+            return Resp(
+                200, "<html>upstream proxy error</html>", {"content-type": "text/html"}
+            ), None
+        if action == "reset":
+            return None, "reset"
+        if action in BOMB_ENCODINGS:
+            encoding = BOMB_ENCODINGS[action]
+            headers = {"content-type": "application/json", "content-encoding": encoding}
+            return Resp(200, bomb(encoding), headers), None
+        if action == "stall":
+            time.sleep(STALL_S)
+        service = self.services.get(req.host)
+        if service is None:
+            return json_error(502, error=f"{req.host} is not on the fake internet"), None
+        if req.too_big():
+            return json_error(413, error={"type": "request_too_large"}), None
+        try:
+            resp = service.handle(req)
+        except Exception as exc:  # a bug in a fake must read as a failure, not hang the agent
+            return json_error(500, error=f"fake {req.host} raised {exc!r}"), None
+        if action == "gzip-padded":
+            answer = json.dumps(resp.body).encode() + b"\n"
+            sent = agentkit.gzip_bomb(answer, PADDED_LINE, PADDED_BYTES)
+            with self._lock:
+                self.padded.append(sent)
+            headers = {
+                **resp.headers,
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+            }
+            return Resp(resp.status, sent, headers), None
+        return resp, action
+
+
+@contextlib.contextmanager
+def resolving_only(served: Iterable[str]) -> Iterator[None]:
+    """Resolve each name in `served` to loopback and refuse every other name, in this process."""
+    # One rule for all three socket lookups: loopback literals go to the real resolver, a served
+    # name is loopback, and everything else, a public IP literal included, is refused. A client
+    # that dials an IP literal without asking the resolver is not stopped here.
+    real_getaddrinfo = socket.getaddrinfo
+    real_gethostbyname = socket.gethostbyname
+    real_gethostbyname_ex = socket.gethostbyname_ex
+    names = frozenset(name.lower() for name in served)
+
+    def route(host: Any) -> bool:
+        """Return True for the real resolver, False for loopback; raise for an unserved name."""
+        name = host.decode() if isinstance(host, bytes) else host
+        if not isinstance(name, str) or _is_loopback(name):
+            return True  # None, or a type the real function refuses itself
+        if name.lower().rstrip(".") in names:
+            return False
+        raise socket.gaierror(socket.EAI_NONAME, f"{name} is not on the fake internet")
+
+    def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
+        if route(host):
+            return real_getaddrinfo(host, port, *args, **kwargs)
+        return real_getaddrinfo("127.0.0.1", port, *args, **kwargs)
+
+    def gethostbyname(host: Any) -> Any:
+        return real_gethostbyname(host) if route(host) else "127.0.0.1"
+
+    def gethostbyname_ex(host: Any) -> Any:
+        return real_gethostbyname_ex(host) if route(host) else (host, [], ["127.0.0.1"])
+
+    socket.getaddrinfo = getaddrinfo
+    socket.gethostbyname = gethostbyname
+    socket.gethostbyname_ex = gethostbyname_ex
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real_getaddrinfo
+        socket.gethostbyname = real_gethostbyname
+        socket.gethostbyname_ex = real_gethostbyname_ex
+
+
+def _is_loopback(name: str) -> bool:
+    """Return whether `name` is `localhost` or a loopback or unspecified address."""
+    if name.lower() == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(name.split("%", 1)[0])
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_unspecified
+
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = BACKLOG
+
+
+class _Handler(BaseHTTPRequestHandler):
+    owner: FakeInternet
+    # One request per connection. A streamed answer switches its own response to HTTP/1.1 for
+    # chunked framing (`_write`), and still closes after it.
+    protocol_version = "HTTP/1.0"
+
+    def _read_body(self) -> bytes:
+        if "chunked" in (self.headers.get("transfer-encoding") or "").lower():
+            out = b""
+            while True:
+                size = int(self.rfile.readline().split(b";", 1)[0].strip() or b"0", 16)
+                if size == 0:
+                    self.rfile.readline()
+                    return out
+                out += self.rfile.read(size)
+                self.rfile.readline()
+        length = int(self.headers.get("content-length") or 0)
+        return self.rfile.read(length) if length else b""
+
+    def _serve(self) -> None:
+        # A request whose body cannot be read is still recorded: a write with a broken body
+        # still reached the service.
+        try:
+            body = self._read_body()
+        except (OSError, ValueError):
+            body = b""
+            self.close_connection = True
+        target = self.path
+        via_proxy = target.startswith(("http://", "https://"))
+        if via_proxy:
+            parts = urlsplit(target)
+            host, path, query = parts.hostname or "", parts.path or "/", parts.query
+        else:
+            host = _hostname(self.headers.get("host") or "")
+            path, _, query = target.partition("?")
+        req = Req(
+            method=self.command,
+            host=host.lower(),
+            path=path,
+            query=dict(parse_qsl(query, keep_blank_values=True)),
+            headers={k.lower(): v for k, v in self.headers.items()},
+            body=body,
+            via_proxy=via_proxy,
+        )
+        resp, action = self.owner.answer(req)
+        if resp is None:
+            self._reset()
+            return
+        # The client may hang up mid-answer, which some scenarios do on purpose.
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            self._write(resp, reset_after_first_chunk=action == "reset-stream")
+
+    def _write(self, resp: Resp, reset_after_first_chunk: bool) -> None:
+        headers = dict(resp.headers)
+        if resp.chunks is not None:
+            # Chunked, as OpenAI and Anthropic send a stream, and not ended by closing the
+            # connection: only a framed body lets a proxy tell a reset from the end.
+            self.protocol_version = "HTTP/1.1"
+            self.close_connection = True
+            headers.setdefault("content-type", "text/event-stream")
+            headers["transfer-encoding"] = "chunked"
+            headers["connection"] = "close"  # as the close below does; never reuse it
+            self.send_response(resp.status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.end_headers()
+            for i, chunk in enumerate(resp.chunks):
+                if resp.hold is not None and i == len(resp.chunks) - 1:
+                    resp.hold.wait(HOLD_TIMEOUT_S)
+                self.wfile.write(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
+                self.wfile.flush()
+                if reset_after_first_chunk and i == 0:
+                    # A reset discards bytes the peer has not read, so the chunk gets time to
+                    # arrive first: a proxy must see both the chunk and the reset.
+                    time.sleep(RESET_AFTER_CHUNK_S)
+                    self._reset()
+                    return
+                if resp.chunk_delay:
+                    time.sleep(resp.chunk_delay)
+            self.wfile.write(b"0\r\n\r\n")
+            return
+        if isinstance(resp.body, (dict, list)):
+            payload = json.dumps(resp.body).encode()
+            headers.setdefault("content-type", "application/json")
+        elif isinstance(resp.body, str):
+            payload = resp.body.encode()
+            headers.setdefault("content-type", "text/plain")
+        elif isinstance(resp.body, bytes):
+            payload = resp.body
+        else:
+            payload = b""
+        self.send_response(resp.status)
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(payload)
+
+    def _reset(self) -> None:
+        """Close with RST rather than FIN: what a dropped upstream looks like to a client."""
+        with contextlib.suppress(OSError):
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            self.connection.close()
+        self.close_connection = True
+
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _serve
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass
+
+
+def _hostname(host_header: str) -> str:
+    if host_header.startswith("["):
+        return host_header[1 : host_header.find("]")]
+    name, sep, port = host_header.rpartition(":")
+    return name if sep and port.isdigit() else host_header

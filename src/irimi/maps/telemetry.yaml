@@ -3,28 +3,27 @@
 #
 # Telemetry is forwarded live in every mode and is never written to the trace store: a recording of
 # the agent's own observability traffic is noise, and replaying it would re-emit someone else's
-# events (#9). It is counted in its own bucket in the run summary, not as a read or a write.
+# events. It is counted in its own bucket in the run summary, not as a read or a write.
 #
-# **No document here sets `default_kind: telemetry`, and none can.** `ShadowPolicy` forwards
-# `telemetry` live exactly like `read`, so a service-wide default would forward every unlisted
-# route on these hosts to the real API - which is why the loader now refuses a `default_kind`
-# naming any kind in `exchange.LIVE_KINDS`, `telemetry` included (#30). It is not theoretical: five
-# of these six vendors serve their REST control plane from the same host as their intake, so
-# `DELETE api.datadoghq.com/api/v1/dashboard/{id}` was performed for real under `irimi shadow`, and
-# the `_finish` telemetry guard kept it out of the trace as well. Intake paths are listed route by
-# route instead; anything unlisted falls to the RFC fallback, so an unsafe method is faked and
-# flagged `unclassified`. Adding a vendor means adding its intake routes, never a default.
+# **No document here sets `default_kind: telemetry`, and none can.** Telemetry is forwarded live
+# like a read, so a service-wide default would forward every unlisted route on these hosts to the
+# real API, and the loader refuses a `default_kind` naming any live kind. Five of these six vendors
+# serve their REST control plane from the same host as their intake, so such a default would
+# perform `DELETE api.datadoghq.com/api/v1/dashboard/{id}` for real and keep it out of the trace.
+# Intake paths are listed route by route instead; anything unlisted falls to the RFC fallback, so
+# an unsafe method is faked and flagged `unclassified`. Adding a vendor means adding its intake
+# routes, never a default.
 #
 # Several hosts here are wildcard patterns (`*.ingest.sentry.io`), because these vendors hand every
-# project its own subdomain. A pattern classifies traffic through the forward door only: it is not
-# a reverse-door allow-list entry, so reaching one through `http://127.0.0.1:4000/<host>/...` needs
-# an explicit `--allow-host <host>`. Quote every wildcard: a bare `*` opens a YAML alias.
+# project its own subdomain. A pattern classifies traffic sent through the proxy only: it does not
+# admit the host in base-URL mode, so reaching one through `http://127.0.0.1:4000/<host>/...` needs
+# an explicit `--base-url-host <host>`. Quote every wildcard: a bare `*` opens a YAML alias.
 version: 1
 service: langsmith
-verbs: honest
+style: rest
 hosts:
   # LangSmith's EU tenant is a *prefix* on the same name, not a subdomain of it, so the US host
-  # alone misses every EU workspace (#34). Listed exactly rather than as `*.smith.langchain.com`,
+  # alone misses every EU workspace. Listed exactly rather than as `*.smith.langchain.com`,
   # which would also claim the web app.
   - api.smith.langchain.com
   - eu.api.smith.langchain.com
@@ -61,13 +60,12 @@ routes:
     # end_time and outputs onto LangSmith's own record of this run and touches nothing the agent
     # can later read back as application state. Not forwarding it would leave every traced run
     # open forever.
-    persists: false
-    comment: closes out the agent's own trace run; no application state
+    live_because: closes out the agent's own trace run; no application state
 
 ---
 version: 1
 service: langfuse
-verbs: honest
+style: rest
 hosts:
   # The shared cloud host is listed exactly as well as by pattern, so the common case resolves
   # without walking the suffixes. An exact host always beats a pattern.
@@ -91,12 +89,12 @@ routes:
 ---
 version: 1
 service: sentry
-verbs: honest
+style: rest
 hosts:
   # Sentry split ingest by region in 2024. A DSN issued since then is `o<org>.ingest.us.sentry.io`,
   # which ends in `.ingest.us.sentry.io` and not in `.ingest.sentry.io`, so the legacy pattern
   # misses it; both regions are listed rather than widening to `*.sentry.io`, because sentry.io is
-  # also the web app, whose REST control plane would then default to telemetry (#25, #30).
+  # also the web app, whose REST control plane would then default to telemetry.
   - "*.ingest.sentry.io"
   - "*.ingest.us.sentry.io"
   - "*.ingest.de.sentry.io"
@@ -132,12 +130,12 @@ routes:
 ---
 version: 1
 service: datadog
-verbs: honest
+style: rest
 hosts:
   # Datadog splits its sites across three TLDs, not three subdomains. US3, US5, AP1 and AP2 are
   # subdomains of datadoghq.com and the first pattern already covers them, but EU1 is
   # `datadoghq.eu` and the US1-FED site is `ddog-gov.com`, so a pattern on `.com` misses both
-  # entirely and their intake was faked rather than forwarded (#34).
+  # entirely and their intake would be faked rather than forwarded.
   - "*.datadoghq.com"
   - "*.datadoghq.eu"
   - "*.ddog-gov.com"
@@ -180,9 +178,9 @@ routes:
 ---
 version: 1
 service: honeycomb
-verbs: honest
+style: rest
 hosts:
-  # Honeycomb's EU instance is its own host; `api.honeycomb.io` misses it (#34).
+  # Honeycomb's EU instance is its own host; `api.honeycomb.io` misses it.
   - api.honeycomb.io
   - api.eu1.honeycomb.io
 routes:
@@ -203,11 +201,11 @@ routes:
 ---
 version: 1
 service: posthog
-verbs: honest
+style: rest
 hosts:
   # One pattern covers the regional ingest hosts too: a pattern matches one *or more* leading
-  # labels, so `*.posthog.com` already matches `eu.i.posthog.com`. A second `*.i.posthog.com`
-  # resolved to this same map and matched nothing the shorter one missed (#29).
+  # labels, so `*.posthog.com` already matches `eu.i.posthog.com`, and a second
+  # `*.i.posthog.com` would match nothing the shorter one misses.
   - "*.posthog.com"
 routes:
   - match:

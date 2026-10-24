@@ -1,84 +1,138 @@
-"""`irimi.fixture`: the vendored response objects the L1 faker starts from (#41).
+"""`services.generic`'s fixtures: the vendored response objects a fixture answer starts from.
 
-Everything here is about the module never raising and never handing out the object it cached.
-It is read from inside a mitmproxy hook, where a raise forwards the flow and a forwarded write
-escapes shadow mode, so every bad file below has to answer "no such object" instead.
-"""
+Read inside a mitmproxy hook, so a bad file answers "no such object" (fail-closed hook rule)."""
 
 import json
 import re
 
 import pytest
 
-from irimi import fixture
+from irimi.servicemaps.loader import load_shipped
+from irimi.services import generic
 
-SHIPPED = ("balance_transaction", "charge", "customer", "payment_intent", "refund")
+
+def named_by_maps(service: str) -> list[str]:
+    """Every object a shipped map's `fixture:` names for `service`."""
+    return sorted(
+        {
+            r.fixture
+            for sm in load_shipped()
+            if sm.service == service
+            for r in sm.routes
+            if r.fixture
+        }
+    )
+
+
+SHIPPED = tuple(named_by_maps("stripe"))
 
 
 @pytest.fixture(autouse=True)
 def clear_fixture_cache():
     """The parsed files are cached for the life of the process; these tests swap the directory."""
-    fixture.clear_cache()
+    generic.clear_fixture_cache()
     yield
-    fixture.clear_cache()
+    generic.clear_fixture_cache()
 
 
 def write_fixtures(tmp_path, monkeypatch, name: str, document) -> None:
-    """Point `fixture` at a directory of our own holding one `<name>.json`."""
+    """Point the fixtures at a directory of our own holding one `<name>.json`."""
     directory = tmp_path / "fixtures"
     directory.mkdir(exist_ok=True)
     text = document if isinstance(document, str) else json.dumps(document)
     (directory / f"{name}.json").write_text(text)
-    monkeypatch.setattr(fixture, "fixtures_dir", lambda: directory)
-    fixture.clear_cache()
+    monkeypatch.setattr(generic, "fixtures_dir", lambda: directory)
+    generic.clear_fixture_cache()
 
 
 # ------------------------------------------------------------------- the file that really ships
 
 
-def test_the_shipped_stripe_fixtures_hold_every_object_the_maps_name():
-    assert sorted(fixture.objects("stripe")) == sorted(SHIPPED)
+@pytest.mark.parametrize("service", ["stripe", "slack"])
+def test_the_shipped_fixtures_hold_exactly_the_objects_the_maps_name(service):
+    """The shipped fixtures hold every object a route names, and nothing else."""
+    assert sorted(generic.fixture_objects(service)) == named_by_maps(service)
 
 
 def test_the_shipped_fixtures_name_where_they_came_from():
-    """Vendored third-party data with no provenance is data nobody can update or re-check."""
-    source = fixture.source("stripe")
+    """The vendored Stripe fixture names its source and licence, so it can be re-checked."""
+    source = generic.fixture_source("stripe")
     assert "stripe-mock" in source and "MIT" in source
     assert "fixtures3.json" in source
 
 
+# The id prefix Stripe gives each object type the shipped fixture holds, nested ones included.
+STRIPE_ID_PREFIXES = {
+    "account": "acct_",
+    "customer": "cus_",
+    "payment_intent": "pi_",
+    "refund": "re_",
+}
+
+
+def _stripe_objects(value):
+    """Every dict in `value` that names its `object` type, at any depth."""
+    if isinstance(value, dict):
+        if isinstance(value.get("object"), str):
+            yield value
+        for item in value.values():
+            yield from _stripe_objects(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _stripe_objects(item)
+
+
+def test_every_shipped_stripe_id_starts_with_its_objects_prefix():
+    """A placeholder id (`obj_123`) is not the shape an agent reading the answer expects."""
+    checked = [
+        (obj["object"], obj["id"])
+        for name in SHIPPED
+        for obj in _stripe_objects(generic.fixture_object("stripe", name))
+        if "id" in obj
+    ]
+    assert {kind for kind, _ in checked} == set(STRIPE_ID_PREFIXES)
+    assert [(k, i) for k, i in checked if not i.startswith(STRIPE_ID_PREFIXES[k])] == []
+
+
+def test_the_shipped_customer_has_no_discount():
+    """A customer with no coupon carries `discount: null`; anything else reads as an active one."""
+    customer = generic.fixture_object("stripe", "customer")
+    assert customer is not None
+    assert customer["discount"] is None
+
+
 def test_a_shipped_object_is_the_real_shape():
-    refund = fixture.get("stripe", "refund")
+    refund = generic.fixture_object("stripe", "refund")
+    assert refund is not None
     assert refund["object"] == "refund"
     assert refund["status"] == "succeeded"
-    # Stripe's refund object carries no `livemode`, which is why the L1 faker sets that field
-    # only where the fixture already has it.
+    # Stripe's refund object has no `livemode`, so the fixture answer sets it only where present.
     assert "livemode" not in refund
-    assert "livemode" in fixture.get("stripe", "customer")
+    customer = generic.fixture_object("stripe", "customer")
+    assert customer is not None
+    assert "livemode" in customer
 
 
 def test_the_fixtures_directory_holds_one_json_file_per_service():
-    names = sorted(p.name for p in fixture.fixtures_dir().iterdir())
+    names = sorted(p.name for p in generic.fixtures_dir().iterdir())
     assert names == ["slack.json", "stripe.json"]
 
 
 def test_the_shipped_slack_fixtures_hold_the_message_object():
-    """chat.postMessage is the one Slack write with a payload of its own. `fixture:` on its route
-    names this object and the envelope nests it under `message:` (#42)."""
-    assert sorted(fixture.objects("slack")) == ["message"]
-    message = fixture.get("slack", "message")
+    """The Slack fixture holds the one object `chat.postMessage` nests under `message:`."""
+    assert sorted(generic.fixture_objects("slack")) == ["message"]
+    message = generic.fixture_object("slack", "message")
+    assert message is not None
     assert message["type"] == "message"
     assert re.fullmatch(r"\d+\.\d{6}", message["ts"])
-    # A null placeholder, not a value: the field is here so a threaded post's own `thread_ts` can
-    # be reflected onto it, and `echo.slack.SlackEnvelope.optional` drops it again when none was
-    # posted (#55). A non-null value here would ship a thread the caller never named.
+    # A null placeholder: a threaded post's `thread_ts` is reflected onto it, and the envelope drops
+    # it when none was posted. A value here would invent a thread the caller never named.
     assert message["thread_ts"] is None
 
 
 def test_the_slack_fixtures_name_where_they_came_from():
-    """Hand-written rather than vendored, which is exactly why the file has to say so: nobody can
-    re-check data against an upstream it does not name."""
-    source = fixture.source("slack")
+    """The hand-written Slack fixture says so and names the docs it follows."""
+    source = generic.fixture_source("slack")
     assert "Hand-written" in source
     assert "api.slack.com" in source
 
@@ -87,30 +141,31 @@ def test_the_slack_fixtures_name_where_they_came_from():
 
 
 def test_get_hands_out_a_copy_so_one_answer_cannot_change_the_next():
-    """The faker writes the request's fields straight over the object it is given. Handing out
-    the cached one would make every later refund carry the first caller's amount and metadata."""
-    first = fixture.get("stripe", "refund")
+    """Each lookup returns a fresh copy, since the faker writes request fields over it."""
+    first = generic.fixture_object("stripe", "refund")
+    assert first is not None
     first["amount"] = 999_999
     first["metadata"]["leaked"] = "yes"
-    second = fixture.get("stripe", "refund")
+    second = generic.fixture_object("stripe", "refund")
+    assert second is not None
     assert second["amount"] != 999_999
     assert second["metadata"] == {}
 
 
 def test_objects_is_keyed_by_name_and_get_returns_none_for_an_unknown_one():
-    assert fixture.get("stripe", "no_such_object") is None
-    assert fixture.get("no_such_service", "refund") is None
+    assert generic.fixture_object("stripe", "no_such_object") is None
+    assert generic.fixture_object("no_such_service", "refund") is None
 
 
 # ------------------------------------------------------------------ every way a file can be bad
 
 
 def test_a_missing_file_is_no_objects_rather_than_a_raise(tmp_path, monkeypatch):
-    monkeypatch.setattr(fixture, "fixtures_dir", lambda: tmp_path / "nope")
-    fixture.clear_cache()
-    assert fixture.objects("stripe") == {}
-    assert fixture.get("stripe", "refund") is None
-    assert fixture.source("stripe") == ""
+    monkeypatch.setattr(generic, "fixtures_dir", lambda: tmp_path / "nope")
+    generic.clear_fixture_cache()
+    assert generic.fixture_objects("stripe") == {}
+    assert generic.fixture_object("stripe", "refund") is None
+    assert generic.fixture_source("stripe") == ""
 
 
 @pytest.mark.parametrize(
@@ -119,38 +174,33 @@ def test_a_missing_file_is_no_objects_rather_than_a_raise(tmp_path, monkeypatch)
 )
 def test_a_malformed_file_is_no_objects_rather_than_a_raise(tmp_path, monkeypatch, document):
     write_fixtures(tmp_path, monkeypatch, "demo", document)
-    assert fixture.objects("demo") == {}
-    assert fixture.get("demo", "thing") is None
+    assert generic.fixture_objects("demo") == {}
+    assert generic.fixture_object("demo", "thing") is None
 
 
 def test_an_entry_that_is_not_an_object_is_skipped_and_the_rest_still_load(tmp_path, monkeypatch):
     write_fixtures(
         tmp_path, monkeypatch, "demo", {"resources": {"good": {"object": "good"}, "bad": [1]}}
     )
-    assert sorted(fixture.objects("demo")) == ["good"]
-    assert fixture.get("demo", "bad") is None
+    assert sorted(generic.fixture_objects("demo")) == ["good"]
+    assert generic.fixture_object("demo", "bad") is None
 
 
 @pytest.mark.parametrize("service", ["../outside", "a/b", "", ".", "..", "sub/../outside"])
 def test_a_service_name_that_is_not_a_bare_name_reads_no_file(tmp_path, monkeypatch, service):
-    """`<service>.json` is a file name built from a map's `service:`, which is any non-empty
-    string the loader accepts. A name spelled `../…` would otherwise choose the file that is
-    read; shipped maps are the only ones that can set `fixture:` today, and this keeps that
-    true of the ones added later.
+    """A `service:` that is not a bare name (`../outside`) reads no fixture file.
 
-    A real file is planted one directory up, so removing the guard makes this test read it
-    rather than merely miss a file that was never there.
-    """
+    A real file is planted one directory up, so removing the guard makes this test read it."""
     write_fixtures(tmp_path, monkeypatch, "demo", {"resources": {"thing": {"object": "thing"}}})
     (tmp_path / "outside.json").write_text(json.dumps({"resources": {"thing": {"id": "leaked"}}}))
-    assert fixture.objects(service) == {}
-    assert fixture.get(service, "thing") is None
+    assert generic.fixture_objects(service) == {}
+    assert generic.fixture_object(service, "thing") is None
 
 
 def test_the_document_is_parsed_once_and_cached(tmp_path, monkeypatch):
     write_fixtures(tmp_path, monkeypatch, "demo", {"resources": {"thing": {"object": "thing"}}})
-    assert fixture.get("demo", "thing") is not None
+    assert generic.fixture_object("demo", "thing") is not None
     (tmp_path / "fixtures" / "demo.json").unlink()
-    assert fixture.get("demo", "thing") is not None, "the parsed file should be cached"
-    fixture.clear_cache()
-    assert fixture.get("demo", "thing") is None
+    assert generic.fixture_object("demo", "thing") is not None, "the parsed file should be cached"
+    generic.clear_fixture_cache()
+    assert generic.fixture_object("demo", "thing") is None

@@ -1,0 +1,129 @@
+"""W3's scenarios: how the queue is consumed, and how a run's identity is (or is not) carried."""
+
+from __future__ import annotations
+
+from tests.e2e.workflows.agents.w03_queue_worker.agent import SCENARIOS, SHARED_CHARGE, charge_id
+from tests.e2e.workflows.harness.scenario import Scenario, Workflow
+from tests.e2e.workflows.harness.services import World
+
+# The version `worker_methods` deploys under, which the process run and each SDK run record.
+AGENT_VERSION = "queue-worker 2.1.0"
+
+
+def _charges(world: World) -> None:
+    for i in range(max(count for count, _, _ in SCENARIOS.values())):
+        world.stripe.add_charge(charge_id(i), 10_000)
+    world.stripe.add_charge(SHARED_CHARGE, 4900)
+
+
+WORKFLOW = Workflow(
+    name="w03_queue_worker",
+    summary="A queue consumer, one @sdk.trigger run per message, over threads and asyncio and "
+    "six HTTP clients: runs must not mix, and a thread without propagate loses its run.",
+    scenarios={
+        "threads_8": Scenario(
+            ("threads_8",),
+            setup=_charges,
+            doc="8 messages on a 4-thread pool; each refund runs in a propagated thread",
+        ),
+        "asyncio_8": Scenario(
+            ("asyncio_8",), setup=_charges, doc="8 async triggers under asyncio.gather"
+        ),
+        "unpropagated_thread": Scenario(
+            ("unpropagated_thread",),
+            setup=_charges,
+            doc="the refund runs in a thread started without sdk.propagate: it has no run",
+        ),
+        "nested_trigger": Scenario(
+            ("nested_trigger",), setup=_charges, doc="a trigger called inside a run joins it"
+        ),
+        "one_message_fails": Scenario(
+            ("one_message_fails",),
+            setup=_charges,
+            doc="one message raises: only its run ends in error, the queue carries on",
+        ),
+        "shared_charge": Scenario(
+            ("shared_charge",),
+            setup=_charges,
+            doc="two runs refund one charge in turn: the second never sees the first run's fake",
+        ),
+        "concurrent_shared_charge": Scenario(
+            ("concurrent_shared_charge",),
+            setup=_charges,
+            doc="two concurrent runs each refund one charge and read it again: each run's read "
+            "and precondition check see its own refund alone",
+        ),
+        "async_run": Scenario(
+            ("async_run",),
+            setup=_charges,
+            doc="each message an `async with sdk.run('message', inputs=message)` block, gathered; "
+            "one raises",
+        ),
+        "cancelled_on_shutdown": Scenario(
+            ("cancelled_on_shutdown",),
+            setup=_charges,
+            doc="the worker shuts down with one message in flight: its task is cancelled mid-run",
+        ),
+        "worker_methods": Scenario(
+            ("worker_methods",),
+            env={"IRIMI_AGENT_VERSION": AGENT_VERSION},
+            setup=_charges,
+            doc="the handlers are a worker object's methods, sync and async, under a named version",
+        ),
+        "coroutine_handoff": Scenario(
+            ("coroutine_handoff",),
+            setup=_charges,
+            doc=(
+                "a sync trigger returns a coroutine: the run goes with it, a nested trigger in it"
+                " joins, and it ends with the coroutine's outcome (one message raises)"
+            ),
+        ),
+        "one_pool_8": Scenario(
+            ("one_pool_8",),
+            setup=_charges,
+            doc="8 messages on 4 threads, every call through one of two shared 1-connection pools",
+        ),
+        "ledger_threads_8": Scenario(
+            ("ledger_threads_8",),
+            setup=_charges,
+            doc="threads_8 with the ledger tools: each message's read tool on its pool thread and "
+            "its write tool in the propagated refund thread, all landing in its own run",
+        ),
+        "ledger_two_tools_8": Scenario(
+            ("ledger_two_tools_8",),
+            setup=_charges,
+            doc="ledger_threads_8 with every odd message's ledger row written by a second write "
+            "tool: two tool names ending at once, printed in the order they ended",
+        ),
+        "ledger_post_waits": Scenario(
+            ("ledger_post_waits",),
+            setup=_charges,
+            doc="two runs whose ledger writes' posts reach irimi in reverse of the order the "
+            "writes ended: an async write's post waits behind the loop's one busy executor "
+            "thread, and a sync write after it posts at once",
+        ),
+        "ledger_asyncio_8": Scenario(
+            ("ledger_asyncio_8",),
+            setup=_charges,
+            doc="asyncio_8 with the ledger tools: an async read, an async write and a sync read "
+            "that returns a coroutine, in eight tasks at once, each call in its task's run",
+        ),
+        "ledger_unpropagated": Scenario(
+            ("ledger_unpropagated",),
+            setup=_charges,
+            doc="the ledger write made in a thread started without sdk.propagate: it has no run, "
+            "so it lands in the process run",
+        ),
+        "ledger_worker": Scenario(
+            ("ledger_worker",),
+            setup=_charges,
+            doc="the worker's ledger tools as its methods: a static read, a class-method write and "
+            "a plain-method write, each fake called as its method is",
+        ),
+        "task_outlives_trigger": Scenario(
+            ("task_outlives_trigger",),
+            setup=_charges,
+            doc="a sync trigger returns a Task: its run ends first, and the task's calls follow",
+        ),
+    },
+)

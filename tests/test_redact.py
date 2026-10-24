@@ -1,8 +1,6 @@
-"""Redaction before anything reaches disk (#69): one or more tests per rule in `irimi.redact`.
+"""Redaction before anything reaches disk: one or more tests per rule in `irimi.record.redact`.
 
-Every test builds its exchange by hand and asks `redact_exchange` or `redact_json` for the copy
-the store (#70) will write. `tests/test_trace_e2e.py` runs the same function over what a real
-`irimi shadow` run hands its store.
+Tests build exchanges by hand; `tests/e2e/test_trace_roundtrip.py` covers a real run's store.
 """
 
 import dataclasses
@@ -15,19 +13,40 @@ import stat
 import subprocess
 import sys
 import threading
-import time
 
 import pytest
 
-from irimi import delegation, paths, redact, secret_shapes
-from irimi.exchange import REDACTION_FAILED_FLAG, Exchange, Request, Response
-from irimi.redact import placeholder, redact_exchange, redact_json
-from tests.test_trace import _filled
+from irimi.config import files, paths
+from irimi.core import secret_shapes
+from irimi.core.exchange import Exchange, Flag, Request, Response
+from irimi.decide import targets
+from irimi.protocol.trace import JSONValue
+from irimi.record import redact
+from irimi.record.redact import placeholder, redact_exchange, redact_json
+from tests.support import builders
+from tests.support.credentials import (
+    ANTHROPIC,
+    AWS,
+    GITHUB,
+    GITHUB_PAT,
+    LIVE_KEY,
+    LIVE_KEY_SHORT,
+    OPENAI,
+    OPENAI_PROJECT,
+    SLACK_APP,
+    SLACK_BOT,
+    SLACK_WEBHOOKS,
+    STRIPE_LIVE,
+    STRIPE_RESTRICTED,
+    STRIPE_TEST,
+    STRIPE_WEBHOOK,
+    TEST_KEY,
+)
+from tests.support.waiting import eventually
 
 KEY = bytes(range(32))
 OTHER_KEY = bytes(range(1, 33))
 JSON = ("content-type", "application/json")
-FORM = ("content-type", "application/x-www-form-urlencoded")
 FAILED_BODY = redact.REDACTION_FAILED.encode()
 
 
@@ -36,29 +55,20 @@ def _ph(value: str, key: bytes = KEY) -> str:
 
 
 def _request(**fields) -> Request:
-    values = {
-        "method": "POST",
-        "scheme": "https",
-        "host": "api.stripe.com",
-        "port": 443,
-        "path": "/v1/refunds",
-        "query": "",
-        "headers": (),
-        "body": b"",
-    }
-    return Request(**{**values, **fields})
+    """A refund POST to Stripe."""
+    return builders.request(**({"method": "POST", "path": "/v1/refunds"} | fields))
 
 
 def _exchange(request: Request | None = None, response: Response | None = None, **fields):
+    """A refund irimi faked, in run `r1`, with no answer unless given one."""
     values = {
         "service": "stripe",
         "operation": "refunds.create",
         "kind": "write",
         "answered_by": "fake-L1",
-        "validation": "unvalidated",
         "run_id": "r1",
     }
-    return Exchange(request=request or _request(), response=response, **{**values, **fields})
+    return builders.exchange(request=request or _request(), response=response, **(values | fields))
 
 
 def _body(body: bytes, *headers: tuple[str, str]) -> bytes:
@@ -77,14 +87,13 @@ def _response_body(body: bytes, *headers: tuple[str, str]) -> bytes:
 
 
 def test_a_placeholder_is_16_hex_digits_of_an_hmac_of_the_value_under_the_key():
-    digest = hmac.new(KEY, b"sk_live_abc", "sha256").hexdigest()
-    assert placeholder(KEY, "sk_live_abc") == f"<redacted:{digest[:16]}>"
+    digest = hmac.new(KEY, LIVE_KEY_SHORT.encode(), "sha256").hexdigest()
+    assert placeholder(KEY, LIVE_KEY_SHORT) == f"<redacted:{digest[:16]}>"
 
 
 def test_the_same_secret_gives_the_same_placeholder_and_another_key_a_different_one():
-    """Design §5.3: what lets a replay match a request against its recording, and what keeps two
-    installs' placeholders apart."""
-    auth = "Bearer sk_test_one"
+    """A secret's placeholder is stable under one key, so replay can match, and differs by key."""
+    auth = f"Bearer {STRIPE_TEST}one"
     ex = _exchange(_request(headers=(("authorization", auth),)))
     first, again = redact_exchange(ex, KEY), redact_exchange(ex, KEY)
     other = redact_exchange(ex, OTHER_KEY)
@@ -97,7 +106,7 @@ def test_the_same_secret_gives_the_same_placeholder_and_another_key_a_different_
 
 
 def test_a_credential_header_is_replaced_whole_on_the_request():
-    basic = "Basic c2tfdGVzdF9hYmM6"  # base64 of `sk_test_abc:`, which no shape can see
+    basic = "Basic c2tfdGVzdF9hYmM6"  # base64 of `TEST_KEY` and a colon, which no shape can see
     ex = _exchange(
         _request(headers=(("Authorization", basic), ("X-Api-Key", "k-123"), ("Accept", "*/*")))
     )
@@ -126,7 +135,7 @@ def test_a_credential_header_is_replaced_on_the_response_and_set_cookie_there_on
 
 
 def test_a_shape_in_a_header_name_is_replaced_on_the_request_and_the_response():
-    secret = "sk_live_abc123"
+    secret = LIVE_KEY
     response = Response(status=200, headers=((f"X-{secret}", "v"),), body=b"")
     ex = _exchange(_request(headers=((f"x-{secret}", "v"), ("accept", "*/*"))), response)
     stored = redact_exchange(ex, KEY)
@@ -136,11 +145,12 @@ def test_a_shape_in_a_header_name_is_replaced_on_the_request_and_the_response():
 
 
 def test_a_url_in_a_header_has_its_query_and_fragment_redacted_by_name():
-    """An OAuth redirect hands the token back in `Location`'s query or fragment, and `Referer`
-    repeats the page's; neither token has a shape. A URL's path to a credential-path host is the
-    secret there too."""
+    """A URL header's query and fragment are redacted by name, and a credential-path URL's path.
+
+    An OAuth redirect hands a token back in `Location`, and `Referer` repeats the page's; neither
+    token has a shape."""
     location = "https://app.example/cb?state=s1&access_token=at1#id_token=it1&x=1"
-    referer = "https://hooks.slack.com/services/T1/B1/S3CR3T?a=1"
+    referer = f"{SLACK_WEBHOOKS}T1/B1/S3CR3T?a=1"
     response = Response(status=302, headers=(("Location", location),), body=b"")
     ex = _exchange(_request(headers=(("referer", referer), ("x-plain", "a?token=b"))), response)
     stored = redact_exchange(ex, KEY)
@@ -161,11 +171,11 @@ def test_a_url_in_a_header_has_its_query_and_fragment_redacted_by_name():
 
 
 def test_the_credential_header_rule_is_the_one_delegation_strips_by():
-    """One statement of "this header is a credential" (#69): a target may not see it, and disk may
-    not see it. `delegation` re-exports it and states it nowhere else."""
-    assert delegation.is_credential_header is redact.is_credential_header
-    assert not hasattr(delegation, "CREDENTIAL_MARKERS")
-    assert not hasattr(delegation, "CREDENTIAL_HEADERS")
+    """`targets` strips exactly the headers `redact` calls credentials."""
+    assert callable(redact.is_credential_header)
+    assert not hasattr(targets, "is_credential_header")
+    assert not hasattr(targets, "CREDENTIAL_MARKERS")
+    assert not hasattr(targets, "CREDENTIAL_HEADERS")
 
 
 # ------------------------------------------------------------------------------ rule 2: secret keys
@@ -199,32 +209,36 @@ def test_an_empty_or_null_secret_is_left_as_it_is():
     """A placeholder would turn "no token was sent" into "a token was sent"."""
     body = b'{"token": null, "password": ""}'
     assert _body(body, JSON) == body
-    assert _body(b"token=&amount=1", FORM) == b"token=&amount=1"
+    assert _body(b"token=&amount=1", builders.FORM_HEADER) == b"token=&amount=1"
     ex = _exchange(_request(headers=(("authorization", ""),)))
     assert redact_exchange(ex, KEY).request.headers == (("authorization", ""),)
 
 
 def test_a_form_field_is_matched_by_its_last_bracket_segment():
-    stored = _body(b"card[token]=tok_x&amount=100&expand[]=token", FORM)
+    stored = _body(b"card[token]=tok_x&amount=100&expand[]=token", builders.FORM_HEADER)
     assert stored == f"card[token]={_ph('tok_x')}&amount=100&expand[]=token".encode()
 
 
 def test_an_empty_bracket_segment_names_nothing_so_the_one_before_it_counts():
     """`token[]` is PHP's and Rails' spelling of a list of tokens: its name is `token`, not ``."""
-    stored = _body(b"token[]=t1&a[password][]=p1&expand[]=x", FORM)
+    stored = _body(b"token[]=t1&a[password][]=p1&expand[]=x", builders.FORM_HEADER)
     assert stored == f"token[]={_ph('t1')}&a[password][]={_ph('p1')}&expand[]=x".encode()
 
 
 def test_a_shape_in_a_form_fields_name_is_replaced():
-    stored = _body(b"sk_live_abc123=1&x%20sk_test_abc=2", FORM)
-    assert stored == f"{_ph('sk_live_abc123')}=1&x%20{_ph('sk_test_abc')}=2".encode()
+    stored = _body(f"{LIVE_KEY}=1&x%20{TEST_KEY}=2".encode(), builders.FORM_HEADER)
+    assert stored == f"{_ph(LIVE_KEY)}=1&x%20{_ph(TEST_KEY)}=2".encode()
 
 
 def test_a_json_body_that_only_claims_to_be_a_form_is_walked_as_json():
-    """Read as a form, `{"password": "hunter2"}` is one pair whose name is the whole document and
-    whose value is empty, so no secret key is ever seen and `hunter2` has no shape."""
-    stored = _body(b'{"password": "hunter2", "note": "sk_live_abc123"}', FORM)
-    assert json.loads(stored) == {"password": _ph("hunter2"), "note": _ph("sk_live_abc123")}
+    """A JSON body sent as a form is walked as JSON, so its `password` value is redacted.
+
+    Read as a form, the whole document is one name with an empty value, and `hunter2` has no shape.
+    """
+    stored = _body(
+        f'{{"password": "hunter2", "note": "{LIVE_KEY}"}}'.encode(), builders.FORM_HEADER
+    )
+    assert json.loads(stored) == {"password": _ph("hunter2"), "note": _ph(LIVE_KEY)}
 
 
 def test_query_parameter_names_are_matched_whole_and_case_insensitively():
@@ -237,18 +251,18 @@ def test_query_parameter_names_are_matched_whole_and_case_insensitively():
 # ------------------------------------------------------------------------------ rule 3: shapes
 
 SAMPLES = [
-    "sk_live_abc123",
-    "sk_test_abc123",
-    "rk_live_abc123",
-    "whsec_abc123",
-    "xoxb-123-456-abc",
-    "xapp-1-A0-abc",
-    "ghp_" + "a" * 36,
-    "github_pat_11AB_cd",
-    "AKIAABCDEFGHIJKLMNOP",
-    "sk-ant-api03-ab_c-d",
-    "sk-proj-" + "a" * 20,
-    "sk-" + "a" * 20,
+    LIVE_KEY,
+    STRIPE_TEST + "abc123",
+    STRIPE_RESTRICTED + "abc123",
+    STRIPE_WEBHOOK + "abc123",
+    SLACK_BOT + "123-456-abc",
+    SLACK_APP + "1-A0-abc",
+    GITHUB + "a" * 36,
+    GITHUB_PAT + "11AB_cd",
+    AWS + "ABCDEFGHIJKLMNOP",
+    ANTHROPIC + "api03-ab_c-d",
+    OPENAI_PROJECT + "a" * 20,
+    OPENAI + "a" * 20,
 ]
 
 
@@ -274,10 +288,9 @@ def test_every_shape_is_replaced_whole_inside_text(secret):
 
 @pytest.mark.parametrize("secret", SAMPLES)
 def test_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted(secret):
-    """Wherever the cut falls, a key at the very start, after a space, after `_`, after each
-    escape, or after a run of letters it does not follow: what it keeps, redacted, is a prefix of
-    the whole redacted, so it holds no part of a key and every key it holds is its whole key's
-    placeholder (#179)."""
+    """Wherever the cut falls, what it keeps, redacted, is a prefix of the whole text redacted.
+
+    So it holds no part of a key, and each key it holds has its whole key's placeholder."""
     text = (
         f"{secret} refused key:\\n{secret}, retry_{secret} as %20{secret} or \\u0020{secret}; "
         f"xx{secret} {'x' * 30}."
@@ -292,9 +305,9 @@ def test_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted(secr
 
 
 def test_any_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted():
-    """The same over text built at random from the pieces a shape is spelled with, its
-    separators and its escapes, each cut at every length: no cut keeps a part of a key, or a
-    key's prefix that redaction would take for a key of its own (#179)."""
+    """No cut of random key-like text keeps part of a key, or a prefix redaction takes for a key.
+
+    The text is built from a shape's pieces, separators and escapes, and cut at every length."""
     pieces = [
         *("sk_live_", "sk_test_", "rk_test_", "whsec_", "xoxb-", "xapp-", "ghp_", "github_pat_"),
         *("AKIA", "sk-ant-", "sk-", "sk-proj-", "proj-", "A", "z", "0", "_", "-", " ", "/", "="),
@@ -315,34 +328,37 @@ def test_any_text_cut_outside_secrets_redacts_to_a_prefix_of_the_whole_redacted(
     [
         ("abc defgh", "abc defgh"),  # within the limit: whole
         ("x" * 20, "x" * 9),  # no key across the cut: at the limit, inside a word or not
-        ("abc sk_live_a1b2", "abc "),  # a key across the cut: before the whole key
-        ("sk_live_a1b2", ""),  # a key from the start: none of it
-        ("abc sk_live_a1 more", "abc "),  # the cut inside a key that ends past it
-        ("sk_live_a / b", "sk_live_a"),  # a key that ends at the cut: kept whole
-        ("abcdefghi sk_live_a", "abcdefghi"),  # a key that starts at the cut: up to it
+        (f"abc {STRIPE_LIVE}a1b2", "abc "),  # a key across the cut: before the whole key
+        (f"{STRIPE_LIVE}a1b2", ""),  # a key from the start: none of it
+        (f"abc {STRIPE_LIVE}a1 more", "abc "),  # the cut inside a key that ends past it
+        (f"{STRIPE_LIVE}a / b", f"{STRIPE_LIVE}a"),  # a key that ends at the cut: kept whole
+        (f"abcdefghi {STRIPE_LIVE}a", "abcdefghi"),  # a key that starts at the cut: up to it
         ("ask_live_a1b2", "ask_live_"),  # a shape after a letter is no key: at the limit
-        ("x_sk_live_a1b2", "x_"),  # after `_` it is one
-        ("%20sk_live_a1", "%20"),  # and after an escape
+        (f"x_{STRIPE_LIVE}a1b2", "x_"),  # after `_` it is one
+        (f"%20{STRIPE_LIVE}a1", "%20"),  # and after an escape
     ],
 )
 def test_a_cut_outside_secrets_moves_only_for_a_key_across_it(text, kept):
-    """The SDK cuts before irimi redacts, so its cut must never keep part of a key (#179). It is
-    made before a key the cut would cross, and at the limit otherwise, so text with no key
-    across the cut, one long word included, keeps as much as a plain cut would."""
+    """A cut moves back before a key it would cross, and otherwise falls at the limit.
+
+    The SDK cuts before irimi redacts, so its cut must never keep part of a key."""
     assert secret_shapes.cut_outside_secrets(text, 9) == kept
 
 
 def test_redaction_finds_the_shapes_a_cut_moves_for():
-    """`redact` and `cut_outside_secrets` read one compiled pattern, so a shape added for one is
-    a shape the other knows (#179)."""
-    assert redact.SECRET_SHAPE is secret_shapes.SECRET_SHAPE
+    """`redact` and `cut_outside_secrets` know the same secret shapes."""
+    assert redact.SECRET_SHAPE is secret_shapes.SECRET_SHAPE  # type: ignore[attr-defined]
+
+
+SHORTEST = STRIPE_LIVE + "a"
 
 
 @pytest.mark.parametrize(
-    "text", ['"sk_live_a"', "=sk_live_a", "/sk_live_a", "_sk_live_a", "sk_live_a", "(sk_live_a)"]
+    "text",
+    [f'"{SHORTEST}"', f"={SHORTEST}", f"/{SHORTEST}", f"_{SHORTEST}", SHORTEST, f"({SHORTEST})"],
 )
 def test_a_shape_after_punctuation_or_at_the_start_is_still_a_secret(text):
-    assert "sk_live_a" not in str(redact_json(text, KEY))
+    assert SHORTEST not in str(redact_json(text, KEY))
 
 
 # What raw text spells a separator as: a JSON string escape inside an SSE line or a text body, and
@@ -352,12 +368,12 @@ ESCAPES = ["\\n", "\\t", "\\r", "\\b", "\\f", "\\u0020", "\\u00A0", "%20", "%3D"
 
 @pytest.mark.parametrize("escape", ESCAPES)
 def test_a_shape_after_an_escape_is_still_a_secret(escape):
-    text = f"key:{escape}sk_live_abc123"
-    assert redact_json(text, KEY) == f"key:{escape}{_ph('sk_live_abc123')}"
+    text = f"key:{escape}{LIVE_KEY}"
+    assert redact_json(text, KEY) == f"key:{escape}{_ph(LIVE_KEY)}"
 
 
 def test_a_shape_after_an_escape_is_replaced_where_text_is_stored_raw():
-    secret = "sk_live_abc123"
+    secret = LIVE_KEY
     sse = f'data: {{"partial_json": "{{\\"note\\": \\"key:\\n{secret}'
     response = Response(status=200, headers=(("content-type", "text/event-stream"),), body=b"")
     ex = _exchange(
@@ -379,7 +395,7 @@ def test_a_shape_glued_to_a_word_is_part_of_the_word():
 
 
 def test_a_shape_is_replaced_in_every_place_text_is_stored():
-    secret = "sk_live_abc123"
+    secret = LIVE_KEY
     response = Response(
         status=200,
         headers=(("Content-Type", "text/event-stream"),),
@@ -418,8 +434,7 @@ def test_a_json_body_behind_a_byte_order_mark_is_walked_as_json():
 
 
 def test_each_line_of_ndjson_and_each_sse_data_line_is_walked_as_json():
-    """A body of one JSON document per line, or an SSE stream whose `data:` fields are each one,
-    is not one JSON document, so it was scanned for shapes only and kept `hunter2`."""
+    """Each NDJSON line and each SSE `data:` line is walked as JSON, so `hunter2` is redacted."""
     ndjson = b'{"token": "hunter2"}\r\n{"a": 1}\n\n'
     assert _response_body(ndjson, ("content-type", "application/x-ndjson")) == (
         f'{{"token":"{_ph("hunter2")}"}}\r\n{{"a": 1}}\n\n'.encode()
@@ -435,8 +450,7 @@ def test_each_line_of_ndjson_and_each_sse_data_line_is_walked_as_json():
 
 
 def test_an_sse_line_ended_by_a_lone_carriage_return_is_walked_as_its_own_line():
-    """SSE ends a line at CRLF, LF or a lone CR. Split at LF alone, a CR-only stream was one line
-    that was not JSON, scanned for shapes only, and kept `hunter2`."""
+    """An SSE line ended by a lone CR is its own line, walked as JSON like one ended by LF."""
     sse = b'data: {"token": "hunter2"}\rdata: {"a": 1}\r\r'
     assert _response_body(sse, ("content-type", "text/event-stream")) == (
         f'data: {{"token":"{_ph("hunter2")}"}}\rdata: {{"a": 1}}\r\r'.encode()
@@ -450,7 +464,8 @@ def test_a_json_line_the_walk_cannot_see_whole_fails_the_body_closed():
 
 
 def test_a_shape_in_a_json_key_is_replaced_too():
-    assert redact_json({"sk_live_k": 1}, KEY) == {_ph("sk_live_k"): 1}
+    named = STRIPE_LIVE + "k"
+    assert redact_json({named: 1}, KEY) == {_ph(named): 1}
 
 
 # ------------------------------------------------------------------------------ rule 4: paths
@@ -469,11 +484,11 @@ def test_a_credential_path_host_spelled_with_its_root_dot_is_the_same_host():
 
 
 def test_a_credential_path_is_replaced_wherever_else_the_exchange_carries_it():
-    """irimi's own 502 for an unreachable answer target names the target's URL, and a bare-origin
-    target's URL ends in the webhook's path; a stub may echo it back in a header. `/` alone is
-    every URL's path and is left alone."""
+    """A credential path is replaced in the 502 for an unreachable target and in echoed headers.
+
+    `/` alone is every URL's path and is left alone."""
     path = "/services/T000/B000/XXXXsecret"
-    reason = f"answer target 'http://127.0.0.1:9/{path[1:]}' could not be reached"
+    reason = f"target 'http://127.0.0.1:9/{path[1:]}' could not be reached"
     response = Response(
         status=502,
         headers=(JSON, ("x-echo", f"got {path}")),
@@ -493,11 +508,11 @@ def test_a_credential_path_is_replaced_wherever_else_the_exchange_carries_it():
 
 
 def test_a_credential_path_holding_a_shape_is_replaced_whole_wherever_else_it_is_carried():
-    """The shape rule runs first, so a path holding `xoxb-…` was no longer there literally: the
-    header and the 502 kept the team and bot ids beside a placeholder of the shape alone, not the
-    one placeholder the request's path is stored as."""
-    path = "/services/T0SHAPE/B0SHAPE/xoxb-12-abc"
-    reason = f"answer target 'http://127.0.0.1:9{path}' could not be reached"
+    """A credential path holding a key shape gets the path's one placeholder wherever it appears.
+
+    The shape rule runs first, so without this the team and bot ids would survive beside it."""
+    path = f"/services/T0SHAPE/B0SHAPE/{SLACK_BOT}12-abc"
+    reason = f"target 'http://127.0.0.1:9{path}' could not be reached"
     response = Response(
         status=502,
         headers=(JSON, ("x-echo", f"got {path}")),
@@ -514,24 +529,22 @@ def test_a_credential_path_holding_a_shape_is_replaced_whole_wherever_else_it_is
 
 
 def test_an_operation_named_after_the_path_is_redacted_with_the_path():
-    """A request no route matched is named `METHOD /path` (`pipeline.classify`), and slack.yaml
-    lists no route for `/workflows/...`: the operation would store the webhook's secret."""
+    """An unmatched request's `METHOD /path` operation is redacted as its path is."""
     path = "/workflows/T1/A1/123/S3CR3T"
     hook = _exchange(
         _request(host="hooks.slack.com", path=path), service="slack", operation=f"POST {path}"
     )
     assert redact_exchange(hook, KEY).operation == f"POST /{_ph(path)}"
-    keyed = _exchange(_request(method="GET", path="/v1/keys/sk_live_abc"))
-    keyed = dataclasses.replace(keyed, operation="GET /v1/keys/sk_live_abc")
-    assert redact_exchange(keyed, KEY).operation == f"GET /v1/keys/{_ph('sk_live_abc')}"
+    keyed = _exchange(_request(method="GET", path=f"/v1/keys/{LIVE_KEY_SHORT}"))
+    keyed = dataclasses.replace(keyed, operation=f"GET /v1/keys/{LIVE_KEY_SHORT}")
+    assert redact_exchange(keyed, KEY).operation == f"GET /v1/keys/{_ph(LIVE_KEY_SHORT)}"
     assert redact_exchange(_exchange(), KEY).operation == "refunds.create"
-    named = _exchange(operation="keys.sk_live_abc")
-    assert redact_exchange(named, KEY).operation == f"keys.{_ph('sk_live_abc')}"
+    named = _exchange(operation=f"keys.{LIVE_KEY_SHORT}")
+    assert redact_exchange(named, KEY).operation == f"keys.{_ph(LIVE_KEY_SHORT)}"
 
 
 def test_the_answer_target_is_redacted_by_the_requests_rules():
-    """A bare-origin target keeps the request's path (`delegation.target_url`), so a webhook's
-    secret path reaches `Exchange.target` too."""
+    """`Exchange.target` is redacted as the request is: a bare-origin target keeps its path."""
     path = "/services/T000/B000/XXXXsecret"
     hook = _exchange(
         _request(host="hooks.slack.com", path=path),
@@ -541,9 +554,9 @@ def test_the_answer_target_is_redacted_by_the_requests_rules():
     assert (
         redact_exchange(hook, KEY).target == f"http://127.0.0.1:3000/{_ph(path)}?token={_ph('t1')}"
     )
-    stripe = _exchange(target="http://127.0.0.1:3000/v1/refunds?k=sk_test_abc")
+    stripe = _exchange(target=f"http://127.0.0.1:3000/v1/refunds?k={TEST_KEY}")
     assert redact_exchange(stripe, KEY).target == (
-        f"http://127.0.0.1:3000/v1/refunds?k={_ph('sk_test_abc')}"
+        f"http://127.0.0.1:3000/v1/refunds?k={_ph(TEST_KEY)}"
     )
     assert redact_exchange(_exchange(), KEY).target == ""
 
@@ -555,20 +568,19 @@ def test_a_body_with_nothing_to_redact_comes_back_byte_for_byte():
     body = b'{ "b" : 1,\n  "a": [ "x", "\\u00e9" ], "max_tokens": 5 }'
     assert _body(body, JSON) == body
     form = b"amount=100&metadata%5Bnote%5D=a+b%20c"
-    assert _body(form, FORM) == form
+    assert _body(form, builders.FORM_HEADER) == form
     text = b"event: ping\ndata: {}\n\n"
     assert _response_body(text, ("Content-Type", "text/event-stream")) == text
 
 
 def test_a_body_that_is_not_utf8_is_stored_unscanned():
-    body = b"\xff\xfe sk_live_abc123"
+    body = b"\xff\xfe " + LIVE_KEY.encode()
     assert _body(body, ("content-type", "application/octet-stream")) == body
 
 
 def test_redact_exchange_returns_a_new_exchange_and_copies_every_other_field():
-    """`dataclasses.replace`, so every field survives - `started_at` and `ended_at` included, and
-    any field added to Exchange later. Nothing in the original changes."""
-    original = _filled(Exchange)
+    """`redact_exchange` returns a copy with every other field kept and the original unchanged."""
+    original = builders.filled(Exchange)
     before = dataclasses.replace(original)
     stored = redact_exchange(original, KEY)
     assert stored is not original
@@ -585,21 +597,20 @@ def test_redact_exchange_returns_a_new_exchange_and_copies_every_other_field():
 
 SSE = ("content-type", "text/event-stream")
 QUIET = b'data: {"text":"hi"}\n'
-LOUD = b'data: {"key":"sk_live_abc123"}\n'
-LOUD_STORED = b'data: {"key":"' + _ph("sk_live_abc123").encode() + b'"}\n'
+LOUD = b'data: {"key":"' + LIVE_KEY.encode() + b'"}\n'
+LOUD_STORED = b'data: {"key":"' + _ph(LIVE_KEY).encode() + b'"}\n'
 LAST = b'data: {"text":"bye"}\n'
 
 
 def _stream(body: bytes, chunks: tuple[int, ...]) -> Exchange:
-    """`redact_exchange`'s copy of a live read whose body streamed as `chunks` (#71)."""
+    """`redact_exchange`'s copy of a live read whose body streamed as `chunks`."""
     assert sum(chunks) == len(body)
     response = Response(status=200, headers=(SSE,), body=body)
     return redact_exchange(_exchange(response=response, stream_chunks=chunks), KEY)
 
 
 def test_a_streamed_body_s_chunks_are_recomputed_over_the_redacted_body_line_by_line():
-    """A boundary in a line redaction left alone keeps its place, and one inside a line it
-    changed moves to that line's end: a JSON `data:` line is re-serialized whole (#71)."""
+    """A chunk boundary keeps its place in an unchanged line and moves to a changed line's end."""
     sent = QUIET + b"\n" + LOUD + b"\n" + LAST
     chunks = (10, len(QUIET) - 10 + 1 + 15, len(LOUD) - 15 + 1 + 5, len(LAST) - 5)
     stored = _stream(sent, chunks)
@@ -614,8 +625,7 @@ def test_a_streamed_body_s_chunks_are_recomputed_over_the_redacted_body_line_by_
 
 
 def test_a_secret_split_across_two_chunks_is_redacted_whole():
-    """The joined body is redacted, never chunk by chunk: a key cut in two by a chunk boundary is
-    one secret on one line, and neither half reaches disk (#71)."""
+    """The joined body is redacted, so a key cut in two by a chunk boundary is redacted whole."""
     cut = LOUD.index(b"abc123")
     stored = _stream(LOUD, (cut, len(LOUD) - cut))
     assert stored.response is not None
@@ -637,12 +647,11 @@ def test_a_stream_redaction_left_alone_keeps_its_chunks():
 
 
 def test_a_stream_whose_lines_do_not_pair_up_after_redaction_is_one_chunk():
-    """A body that is one JSON document is re-serialized compactly, which can join its lines, so
-    no boundary can be carried over: the stored body is one chunk."""
-    sent = b'{\n  "key": "sk_live_abc123"\n}\n'
+    """A one-document JSON body re-serialized compactly can join its lines, so it is one chunk."""
+    sent = b'{\n  "key": "' + LIVE_KEY.encode() + b'"\n}\n'
     stored = _stream(sent, (4, len(sent) - 4))
     assert stored.response is not None
-    assert stored.response.body == b'{"key":"' + _ph("sk_live_abc123").encode() + b'"}'
+    assert stored.response.body == b'{"key":"' + _ph(LIVE_KEY).encode() + b'"}'
     assert stored.stream_chunks == (len(stored.response.body),)
 
 
@@ -654,12 +663,11 @@ def test_a_stream_that_could_not_be_redacted_is_one_chunk(monkeypatch):
     stored = _stream(LOUD + LAST, (4, len(LOUD) + len(LAST) - 4))
     assert stored.response is not None and stored.response.body == FAILED_BODY
     assert stored.stream_chunks == (len(FAILED_BODY),)
-    assert REDACTION_FAILED_FLAG in stored.flags
+    assert Flag.REDACTION_FAILED in stored.flags
 
 
 def test_every_split_of_a_stream_still_splits_its_redacted_body():
-    """Whatever chunks the wire cut a stream into, the stored ones are positive and add up to the
-    stored body, and a boundary before the changed line keeps its offset."""
+    """Every split of a stream gives positive chunks that add up to the stored body."""
     sent = QUIET + LOUD + b"\r\n" + LAST
     for first in range(1, len(sent)):
         for second in range(first + 1, len(sent)):
@@ -673,8 +681,7 @@ def test_every_split_of_a_stream_still_splits_its_redacted_body():
 
 
 def test_a_boundary_between_a_carriage_return_and_its_line_feed_stays_in_that_line():
-    """CRLF is one line end, so a boundary between its CR and LF is inside the line: kept there
-    when redaction left the line alone, moved past the LF when it changed it (#71)."""
+    """A boundary between CR and LF stays put in an unchanged line, and moves past the LF if not."""
     quiet, loud, loud_stored = (line.replace(b"\n", b"\r\n") for line in (QUIET, LOUD, LOUD_STORED))
     sent = quiet + loud + LAST
     chunks = (len(quiet) - 1, len(loud), len(LAST) + 1)  # after each CR, before its LF
@@ -686,8 +693,7 @@ def test_a_boundary_between_a_carriage_return_and_its_line_feed_stays_in_that_li
 
 
 def test_rechunk_never_raises_and_still_splits_the_stored_body():
-    """Chunks that do not add up to the body - no engine hands redaction those - are still no
-    reason to raise on the writer thread: the stored body is one chunk (#71)."""
+    """Chunks that do not add up to the body store it as one chunk rather than raise."""
     assert redact._rechunk(QUIET + LOUD, QUIET + LOUD_STORED, (1, 999, 5)) == (
         len(QUIET + LOUD_STORED),
     )
@@ -697,21 +703,20 @@ def test_rechunk_never_raises_and_still_splits_the_stored_body():
 
 # Every secret shape redaction knows, each a line of its own among lines nothing changes.
 _STREAM_SECRETS = (
-    "sk_live_abc123",
-    "sk_test_Q9",
-    "rk_live_zz9",
-    "whsec_abc",
-    "xoxb-123-abc",
-    "xapp-1-A0-xyz",
-    "ghp_" + "a" * 36,
-    "github_pat_11AA_bb",
-    "AKIA" + "ABCDEFGHIJKLMNOP",
-    "sk-ant-api03-xy_z",
-    "sk-proj-" + "q" * 22,
+    LIVE_KEY,
+    STRIPE_TEST + "Q9",
+    STRIPE_RESTRICTED + "zz9",
+    STRIPE_WEBHOOK + "abc",
+    SLACK_BOT + "123-abc",
+    SLACK_APP + "1-A0-xyz",
+    GITHUB + "a" * 36,
+    GITHUB_PAT + "11AA_bb",
+    AWS + "ABCDEFGHIJKLMNOP",
+    ANTHROPIC + "api03-xy_z",
+    OPENAI_PROJECT + "q" * 22,
 )
-# Characters several bytes long, so a boundary can fall inside one, and characters `str.splitlines`
-# ends a line at and SSE does not: a remap that split the text and the bytes differently would
-# pair the wrong lines.
+# Multi-byte characters, so a boundary can fall inside one, and ones `str.splitlines` ends a line
+# at but SSE does not: a remap that split text and bytes differently would pair the wrong lines.
 _ODD = ("é", "日本", "\U0001f600", " ", " ", "\x85", "\x0b", "\x0c", "\x1c")
 
 
@@ -736,11 +741,9 @@ def _random_stream(rng) -> bytes:
 
 
 def test_any_split_of_any_stream_is_carried_over_to_its_redacted_body():
-    """#71's rule, restated boundary by boundary over seeded random streams cut at random bytes -
-    inside a secret, inside a character, between a CR and its LF, one byte from either end: the
-    stored chunks are positive and add up to the stored body, a boundary in a line redaction left
-    alone keeps its offset in it, one in a line it changed moves to that line's end, and there is
-    no other boundary."""
+    """The stream-chunk rule holds boundary by boundary over seeded random streams and cuts.
+
+    Cuts fall inside a secret, a character or a CRLF, and one byte from either end."""
     rng = random.Random(71)
     for _ in range(1000):
         sent = _random_stream(rng)
@@ -770,8 +773,7 @@ def test_any_split_of_any_stream_is_carried_over_to_its_redacted_body():
 
 
 def test_a_streamed_body_redaction_leaves_alone_keeps_its_chunks_whatever_its_content_type():
-    """`_rechunk` follows the body, not the content type: a stream redaction does not change keeps
-    the chunks it came in, and one it does is carried over by the same rule."""
+    """`_rechunk` follows the body, not the content type."""
     for content_type in ("text/event-stream", "application/x-ndjson", "text/plain"):
         response = Response(status=200, headers=(("content-type", content_type),), body=QUIET)
         ex = _exchange(response=response, stream_chunks=(3, len(QUIET) - 3))
@@ -787,19 +789,19 @@ def test_a_streamed_body_redaction_leaves_alone_keeps_its_chunks_whatever_its_co
 def test_a_parser_that_raises_stores_neither_body_and_flags_the_exchange(monkeypatch):
     request = _request(headers=(JSON,), body=b'{"amount": 100}')
     response = Response(status=200, headers=(JSON,), body=b'{"id": "re_1"}')
-    ex = _exchange(request, response, flags=("fidelity:L1",))
+    ex = _exchange(request, response, flags=())
 
     def boom(*args, **kwargs):
         raise RuntimeError("parser broke")
 
-    monkeypatch.setattr(redact.json, "loads", boom)
+    monkeypatch.setattr(redact.json, "loads", boom)  # type: ignore[attr-defined]
     stored = redact_exchange(ex, KEY)
     assert stored.response is not None
     assert (stored.request.body, stored.response.body) == (FAILED_BODY, FAILED_BODY)
-    assert stored.flags == ("fidelity:L1", REDACTION_FAILED_FLAG)
+    assert stored.flags == (Flag.REDACTION_FAILED,)
     assert stored.request.headers == request.headers
     again = redact_exchange(dataclasses.replace(ex, flags=stored.flags), KEY)
-    assert again.flags.count(REDACTION_FAILED_FLAG) == 1
+    assert again.flags.count(Flag.REDACTION_FAILED) == 1
 
 
 @pytest.mark.parametrize(
@@ -812,36 +814,35 @@ def test_a_parser_that_raises_stores_neither_body_and_flags_the_exchange(monkeyp
     ids=["a-repeated-key", "a-repeated-key-deeper", "an-integer-past-the-digit-limit"],
 )
 def test_json_the_walk_cannot_see_whole_fails_closed_rather_than_scanned_as_text(body):
-    """`json.loads` keeps a repeated key's last value, and refuses a long integer with a plain
-    ValueError: a walk of the one, or a text scan of the other, would store the secret as sent."""
+    """A repeated key or an over-long integer fails closed rather than being scanned as text.
+
+    `json.loads` keeps a repeated key's last value and refuses a long integer."""
     stored = redact_exchange(_exchange(_request(headers=(JSON,), body=body)), KEY)
     assert stored.request.body == FAILED_BODY
-    assert stored.flags == (REDACTION_FAILED_FLAG,)
+    assert stored.flags == (Flag.REDACTION_FAILED,)
 
 
 def test_a_body_too_deep_to_redact_fails_closed_and_the_log_names_no_value(caplog):
-    """Python 3.12's `json.loads` raises RecursionError on this body and 3.14's parses it, so the
-    walk raises instead. Either way the body is not stored."""
-    body = b"[" * 100_000 + b'"sk_live_abc"' + b"]" * 100_000
-    with caplog.at_level(logging.WARNING, logger="irimi.redact"):
+    """A body too deep to walk is not stored, whether `json.loads` or the walk raises."""
+    body = b"[" * 100_000 + f'"{LIVE_KEY_SHORT}"'.encode() + b"]" * 100_000
+    with caplog.at_level(logging.WARNING, logger="irimi.record.redact"):
         stored = redact_exchange(_exchange(_request(headers=(JSON,), body=body)), KEY)
     assert stored.request.body == FAILED_BODY
-    assert REDACTION_FAILED_FLAG in stored.flags
+    assert Flag.REDACTION_FAILED in stored.flags
     assert "the request body" in caplog.text
     assert "sk_live" not in caplog.text
 
 
 def test_a_header_that_cannot_be_hashed_fails_closed_alone(caplog):
-    """A lone surrogate cannot be encoded for the HMAC, and the UnicodeEncodeError's own message
-    would quote it: the log names the exception's type only."""
+    """A header with a lone surrogate fails closed alone, and the log names only the error type."""
     headers = (("authorization", "Bearer \udcff"), ("accept", "*/*"))
-    with caplog.at_level(logging.WARNING, logger="irimi.redact"):
+    with caplog.at_level(logging.WARNING, logger="irimi.record.redact"):
         stored = redact_exchange(_exchange(_request(headers=headers)), KEY)
     assert stored.request.headers == (
         ("authorization", redact.REDACTION_FAILED),
         ("accept", "*/*"),
     )
-    assert stored.flags == (REDACTION_FAILED_FLAG,)
+    assert stored.flags == (Flag.REDACTION_FAILED,)
     assert "UnicodeEncodeError" in caplog.text
     assert "\udcff" not in caplog.text
     assert "\\udcff" not in caplog.text  # the exception's message spells it this way
@@ -851,7 +852,7 @@ def test_a_path_that_cannot_be_hashed_fails_closed_and_still_starts_with_a_slash
     ex = _exchange(_request(host="hooks.slack.com", path="/services/\udcff"))
     stored = redact_exchange(ex, KEY)
     assert stored.request.path == "/" + redact.REDACTION_FAILED
-    assert stored.flags == (REDACTION_FAILED_FLAG,)
+    assert stored.flags == (Flag.REDACTION_FAILED,)
 
 
 def test_a_lone_surrogate_in_a_body_that_changed_fails_that_body_alone():
@@ -862,27 +863,30 @@ def test_a_lone_surrogate_in_a_body_that_changed_fails_that_body_alone():
     assert stored.request.body == FAILED_BODY
     assert stored.response is not None
     assert stored.response.body == b'{"id": "re_1"}'
-    assert stored.flags == (REDACTION_FAILED_FLAG,)
+    assert stored.flags == (Flag.REDACTION_FAILED,)
 
 
 # ------------------------------------------------------------------------------ redact_json
 
 
 def test_redact_json_hides_trigger_and_tool_arguments():
-    args = {"argv": ["agent.py", "--key", "sk_test_abc"], "config": {"API_KEY": "v", "n": 2}}
+    args: dict[str, JSONValue] = {
+        "argv": ["agent.py", "--key", TEST_KEY],
+        "config": {"API_KEY": "v", "n": 2},
+    }
     assert redact_json(args, KEY) == {
-        "argv": ["agent.py", "--key", _ph("sk_test_abc")],
+        "argv": ["agent.py", "--key", _ph(TEST_KEY)],
         "config": {"API_KEY": _ph("v"), "n": 2},
     }
     assert args["config"] == {"API_KEY": "v", "n": 2}
-    untouched = {"a": [1, 2.5, None, True, "x"]}
+    untouched: dict[str, JSONValue] = {"a": [1, 2.5, None, True, "x"]}
     assert redact_json(untouched, KEY) is untouched
 
 
 def test_redact_json_fails_closed_on_a_value_that_is_not_json():
     """A tuple is not JSON, and `json.dumps` would still write its secret as an array."""
-    assert redact_json(("sk_live_abc",), KEY) == redact.REDACTION_FAILED
-    assert redact_json({"a": {"b"}}, KEY) == redact.REDACTION_FAILED
+    assert redact_json((LIVE_KEY_SHORT,), KEY) == redact.REDACTION_FAILED  # type: ignore[arg-type]
+    assert redact_json({"a": {"b"}}, KEY) == redact.REDACTION_FAILED  # type: ignore[dict-item]
 
 
 def test_redact_json_fails_closed_on_a_value_too_deep_to_walk():
@@ -935,7 +939,7 @@ def test_a_process_that_loses_the_race_reads_the_winners_key(tmp_path, monkeypat
         (home / paths.REDACT_KEY_NAME).write_bytes(winner)
         real_link(src, dst)
 
-    monkeypatch.setattr(redact.os, "link", link_after_the_winner)
+    monkeypatch.setattr(redact.os, "link", link_after_the_winner)  # type: ignore[attr-defined]
     assert redact.load_key(home) == winner
     assert sorted(p.name for p in home.iterdir()) == [paths.REDACT_KEY_NAME]
 
@@ -947,8 +951,7 @@ def test_a_key_file_irimi_did_not_write_is_refused(tmp_path):
 
 
 def test_a_key_path_that_is_not_a_regular_file_is_refused(tmp_path):
-    """A directory and a dangling symlink: neither is a key, and each would otherwise be a bare
-    OSError."""
+    """A directory or a dangling symlink at the key path is refused with a message."""
     for name, make in (
         ("dir", lambda p: p.mkdir()),
         ("dangling", lambda p: p.symlink_to(tmp_path / "missing")),
@@ -961,8 +964,7 @@ def test_a_key_path_that_is_not_a_regular_file_is_refused(tmp_path):
 
 
 def test_a_symlinked_key_is_followed_so_two_installs_can_share_one(tmp_path):
-    """A key mounted from elsewhere (a Kubernetes Secret volume is a tree of symlinks) is this
-    install's key, and it is read, never replaced (#69)."""
+    """A symlinked key, as a Kubernetes Secret volume mounts one, is read and never replaced."""
     shared = tmp_path / "secret" / "redact.key"
     shared.parent.mkdir()
     shared.write_bytes(b"k" * 32)
@@ -974,8 +976,7 @@ def test_a_symlinked_key_is_followed_so_two_installs_can_share_one(tmp_path):
 
 
 def test_load_key_creates_a_missing_home_0700(tmp_path):
-    """As `ca.generate_ca` makes the directory that holds its private key; an existing home keeps
-    its mode, because it holds more than the key and the user may have chosen it."""
+    """`load_key` makes a missing home 0700, and leaves an existing home's mode alone."""
     old = os.umask(0o022)
     try:
         home = tmp_path / "a" / "home"
@@ -994,7 +995,7 @@ def test_load_key_creates_a_missing_home_0700(tmp_path):
 KEY_RACER = """
 import sys, time
 from pathlib import Path
-from irimi import redact
+from irimi.record import redact
 
 home, go, ready = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 ready.touch()
@@ -1005,9 +1006,9 @@ print(redact.load_key(home).hex())
 
 
 def test_load_key_raced_by_separate_processes_gives_each_the_one_0600_key(tmp_path):
-    """#69's "if creation loses a race with another process, it reads the winner's file", between
-    processes. Eight interpreters, released together against one home that does not exist yet,
-    all read back the one key: 32 bytes, the file mode 0600, and no temporary file left behind."""
+    """Eight processes racing to create the key all read the winner's: 32 bytes, mode 0600.
+
+    No temporary file is left behind."""
     home = tmp_path / "fresh-home"
     go = tmp_path / "go"
     ready = [tmp_path / f"ready-{i}" for i in range(8)]
@@ -1020,10 +1021,12 @@ def test_load_key_raced_by_separate_processes_gives_each_the_one_0600_key(tmp_pa
         for r in ready
     ]
     try:
-        deadline = time.monotonic() + 20
-        while not all(r.exists() for r in ready):
-            assert time.monotonic() < deadline, "a racer never started"
-            time.sleep(0.005)
+        eventually(
+            lambda: all(r.exists() for r in ready),
+            timeout=20,
+            interval=0.005,
+            message="a racer never started",
+        )
         go.touch()
         outs = [racer.communicate(timeout=20) for racer in racers]
     finally:
@@ -1034,5 +1037,5 @@ def test_load_key_raced_by_separate_processes_gives_each_the_one_0600_key(tmp_pa
     assert len(key) == redact.KEY_BYTES
     path = home / paths.REDACT_KEY_NAME
     assert path.read_bytes() == key
-    assert stat.S_IMODE(path.stat().st_mode) == redact.KEY_MODE
+    assert stat.S_IMODE(path.stat().st_mode) == files.FILE_MODE
     assert [p.name for p in home.iterdir()] == [paths.REDACT_KEY_NAME]

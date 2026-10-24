@@ -1,15 +1,19 @@
 # irimi
 
-Shadow mode for AI agents: a local MITM proxy where reads are real and writes are virtual.
+Shadow mode for AI agents: a local MITM proxy where reads are real and writes are faked.
 Python 3.12+, managed with `uv`. See `docs/architecture.md` for the module map and
 `CONTRIBUTING.md` for setup and conventions.
 
 ## Commands
 
 - `make check` runs everything CI runs: `ruff check`, `ruff format --check`, `mypy`, `pytest`.
-- `uv run pytest -q` for the tests alone (about five minutes, no network, no keys).
-- `uv run pytest -q tests/e2e/workflows` for the sample-workflow corpus alone; see
+- `uv run pytest -q -n auto tests` for the tests alone: about 7,000 tests, no network, no keys,
+  about two and a half minutes in parallel and six and a half serially (`uv run pytest -q`).
+- `make test-fast` for the unit tests without the end-to-end runs and the workflow corpus.
+- `uv run pytest -q -n auto tests/e2e/workflows` for the sample-workflow corpus alone, and
+  `uv run python -m tests.e2e.workflows <workflow> <scenario>` for one scenario; see
   `tests/e2e/workflows/README.md`.
+- `make demo` runs `examples/hello_agent.py` under `irimi shadow` against fake services.
 - `uv run irimi --help` for the CLI.
 
 ## Rules that tests enforce
@@ -22,7 +26,7 @@ Python 3.12+, managed with `uv`. See `docs/architecture.md` for the module map a
   and `docs/architecture.md`; a new module has to be placed in both.
 - Nothing in a mitmproxy hook may raise: a raised hook forwards the flow, and a forwarded write
   escapes shadow mode. Fail closed and flag it.
-- THE SCOPE RULE (`servicemaps/rules.py`): no classification that forwards live may apply to an
+- The scope rule (`servicemaps/rules.py`): no classification that forwards live may apply to an
   unsafe method it did not name explicitly. Enforce a safety rule at load time and at the decision.
 - Every response irimi decided carries `Irimi-Answered-By`; a live forward carries none.
 - Comments follow CONTRIBUTING's style guide; `tests/test_prose_style.py` holds the counts to a

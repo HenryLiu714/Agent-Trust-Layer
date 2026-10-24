@@ -11,7 +11,19 @@ from pathlib import Path
 import pytest
 
 from irimi.core import limits
-from irimi.core.exchange import Exchange, Flag, Kind, Precondition, Request, Response
+from irimi.core.exchange import (
+    AnsweredBy,
+    Door,
+    Exchange,
+    Flag,
+    IssuedBy,
+    Kind,
+    OverlayCoverage,
+    Precondition,
+    PreconditionOutcome,
+    Request,
+    Response,
+)
 from irimi.protocol import control as protocol_control
 from irimi.protocol import trace
 from irimi.protocol.control import (
@@ -752,11 +764,16 @@ def test_error_info_survives_an_exception_it_cannot_print():
 # --------------------------------------------------------------------------- the reference page
 
 EXAMPLE_BLOBS = (
-    b'{"id":"ch_3PqA1","object":"charge","amount":4900,"amount_refunded":0,"currency":"usd",'
-    b'"refunded":false}',
-    b"charge=ch_3PqA1&amount=4900",
-    b'{"id":"re_Kd82nQ4xT1bV9mZ3pL6wR0yS","object":"refund","amount":4900,"charge":"ch_3PqA1",'
-    b'"currency":"usd","status":"succeeded"}',
+    b'{"id": "ch_demo1", "object": "charge", "amount": 4900, "amount_refunded": 0, '
+    b'"refunded": false, "currency": "usd", "customer": null, "status": "succeeded", '
+    b'"paid": true, "created": 1790000000, "metadata": {}}',
+    b"charge=ch_demo1&amount=4900",
+    b'{"amount": 4900, "balance_transaction": "txn_kYRDGB3FUDFCLA08rTInOvaw", '
+    b'"charge": "ch_demo1", "created": 1792803261, "currency": "usd", "customer": null, '
+    b'"customer_account": null, "destination_details": {"card": {"type": "reversal"}, '
+    b'"type": "card"}, "id": "re_a7CNxM1DbNFjcVBH0Or8Ihpu", "metadata": {}, "object": "refund", '
+    b'"payment_intent": null, "payment_method": null, "reason": null, "receipt_number": null, '
+    b'"source_transfer_reversal": null, "status": "succeeded", "transfer_reversal": null}',
 )
 
 
@@ -764,14 +781,25 @@ def _doc_blocks(info: str) -> list[str]:
     return re.findall(rf"^```json {re.escape(info)}\n(.*?)^```$", DOC.read_text(), re.M | re.S)
 
 
-def _doc_table(marker: str) -> list[str]:
-    """The first column of the first table after `marker` on the page: one field name per row."""
+def _doc_column(marker: str) -> list[str]:
+    """The first column of the first table after `marker` on the page, each cell unquoted."""
     text = DOC.read_text()
     table = re.search(r"^\|.*?(?=^[^|]|\Z)", text[text.index(marker) :], re.M | re.S)
     assert table is not None, f"no table after {marker}"
-    names = [row.split("|")[1].strip() for row in table.group(0).strip().splitlines()[2:]]
-    assert all(re.fullmatch(r"`\w+`", name) for name in names), f"one field per row: {names}"
-    return [name.strip("`") for name in names]
+    cells = [row.split("|")[1].strip() for row in table.group(0).strip().splitlines()[2:]]
+    assert all(re.fullmatch(r"`[^`]+`", cell) for cell in cells), f"one value per row: {cells}"
+    return [cell.strip("`") for cell in cells]
+
+
+def _doc_table(marker: str) -> list[str]:
+    """The first column of the first table after `marker` on the page: one field name per row."""
+    names = _doc_column(marker)
+    assert all(re.fullmatch(r"\w+", name) for name in names), f"one field per row: {names}"
+    return names
+
+
+def _exchange_json() -> dict[str, typing.Any]:
+    return trace.exchange_to_json(builders.filled(Exchange), _Blobs().put)
 
 
 @pytest.mark.parametrize(
@@ -779,17 +807,56 @@ def _doc_table(marker: str) -> list[str]:
     [
         ("(`trace.RunRecord`)", lambda: trace.run_to_json(_run_record())),
         ("(`trace.Trigger`)", lambda: trace.run_to_json(_run_record())["trigger"]),
-        (
-            "(`irimi.core.exchange.Exchange`)",
-            lambda: trace.exchange_to_json(builders.filled(Exchange), _Blobs().put),
-        ),
+        ("(`trace.ErrorInfo`)", lambda: trace.error_to_json(builders.filled(ErrorInfo))),
+        ("(`irimi.core.exchange.Exchange`)", _exchange_json),
+        ("(`exchange.Request`)", lambda: _exchange_json()["request"]),
+        ("(`exchange.Response`)", lambda: _exchange_json()["response"]),
+        ("(`trace.BodyRef`)", lambda: _exchange_json()["request"]["body"]),
         ("(`trace.ToolCall`)", lambda: trace.tool_call_to_json(builders.filled(ToolCall))),
+        (
+            "(`trace.TelemetrySeen`)",
+            lambda: trace.telemetry_to_json(builders.filled(TelemetrySeen)),
+        ),
     ],
-    ids=["run", "trigger", "exchange", "tool_call"],
+    ids=[
+        "run",
+        "trigger",
+        "error",
+        "exchange",
+        "request",
+        "response",
+        "body_ref",
+        "tool_call",
+        "telemetry",
+    ],
 )
 def test_each_field_table_on_the_page_is_what_its_encoder_writes(marker, encode):
     """Each field table on the page lists exactly the keys its encoder writes, in that order."""
     assert _doc_table(marker) == list(encode())
+
+
+@pytest.mark.parametrize(
+    ("marker", "values"),
+    [
+        ("(`trace.Mode`)", typing.get_args(trace.Mode)),
+        ("(`trace.Attribution`)", typing.get_args(trace.Attribution)),
+        ("(`trace.RunStatus`)", typing.get_args(trace.RunStatus)),
+        ("(`exchange.Kind`)", typing.get_args(Kind)),
+        ("(`exchange.AnsweredBy`)", typing.get_args(AnsweredBy)),
+        ("(`exchange.Door`)", typing.get_args(Door)),
+        ("(`exchange.IssuedBy`)", typing.get_args(IssuedBy)),
+        ("(`exchange.OverlayCoverage`)", typing.get_args(OverlayCoverage)),
+        ("(`exchange.PreconditionOutcome`)", typing.get_args(PreconditionOutcome)),
+        ("(`trace.ToolKind`)", typing.get_args(trace.ToolKind)),
+        ("(`trace.Ran`)", typing.get_args(trace.Ran)),
+        ("(`trace.EventType`)", typing.get_args(trace.EventType)),
+        ("(`exchange.Flag`)", tuple(flag.value for flag in Flag)),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "values",
+)
+def test_each_vocabulary_table_on_the_page_lists_every_value_the_code_knows(marker, values):
+    """Each vocabulary table lists exactly its vocabulary's values, in the code's order."""
+    assert _doc_column(marker) == list(values)
 
 
 def test_the_documented_example_decodes_with_the_codecs():
@@ -812,12 +879,13 @@ def test_the_documented_example_decodes_with_the_codecs():
     lines = [
         trace.event_from_json(json.loads(text), get_body) for text in _doc_blocks("events.jsonl")
     ]
-    assert [seq for seq, _ in lines] == [1, 2, 3, 4]
-    (_, check), (_, refund), (_, tool), (_, seen) = lines
+    assert [seq for seq, _ in lines] == [1, 4, 5, 6]
+    (_, lookup), (_, check), (_, refund), (_, fake) = lines
+    assert isinstance(lookup, ToolCall) and (lookup.kind, lookup.ran) == ("read", "real")
     assert isinstance(check, Exchange) and isinstance(refund, Exchange)
     assert (check.issued_by, refund.precondition.outcome) == ("engine", "passed")
-    assert refund.request.body == b"charge=ch_3PqA1&amount=4900"
-    assert isinstance(tool, ToolCall) and isinstance(seen, TelemetrySeen)
+    assert refund.request.body == b"charge=ch_demo1&amount=4900"
+    assert isinstance(fake, ToolCall) and (fake.kind, fake.ran) == ("write", "shadow")
     assert all(ev.run_id == record.run_id for _, ev in lines)
     # The page's ordering rule: `seq` is completion order, `started_at` start order.
     assert refund.started_at < check.started_at <= check.ended_at < refund.ended_at

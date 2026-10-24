@@ -1,471 +1,438 @@
-# Trace format, version 2
+# Trace format
 
-This is the reference for what irimi writes about a run, and the contract between the phase that
-records runs (Phase 3) and everything that reads them: `irimi runs show` prints a stored run,
-`irimi compare` lines two up, and a replay answers an agent from one (#82). The shape and its JSON codec live in `src/irimi/protocol/trace.py`, which does no
-I/O. The store (#70) writes the files described here. `tests/test_trace.py` holds this page to the
-code: the example at the end decodes with those codecs and re-encodes to itself, key for key, and
-the first column of each field table below is exactly the keys its encoder writes, in order.
+For authors of tools that read the runs irimi stores: dashboards, CI checks, exporters. This page
+is the specification of what irimi writes about a run: the files, every record and field, every
+closed vocabulary and the compatibility rules. How the store writes these files safely is in
+[architecture.md](architecture.md#store-internals), what redaction removes is in
+[security.md](security.md#redaction), and how `irimi runs show` prints a run is in
+[cli.md](cli.md#irimi-runs-show).
 
-## Layout on disk
+## About this format
+
+- **Version.** Each run records the format version it was written in, `schema_version`. irimi 0.2
+  writes version 3; irimi 0.1.0 wrote version 2. Version 1 was never released.
+- **Compatibility.** A reader reads every older version. It ignores a field it does not know, so a
+  field older readers can do without is added with no version bump. Adding a value to a closed
+  vocabulary, or removing, renaming or changing the meaning of a field, bumps the version, and an
+  older reader refuses a run written in a newer one rather than misreading it.
+- **While irimi is 0.x**, a minor release may bump the version. Each bump is listed under
+  [Versioning](#versioning), and the "Since" column of each table names the version a field or
+  value first appeared in.
+- **Held to the code.** The codecs are `src/irimi/protocol/trace.py`. `tests/test_trace.py` checks
+  that the first column of each field table below is exactly the keys its encoder writes, in
+  order, that each vocabulary table lists exactly the values the code knows, and that the example
+  at the end decodes and re-encodes to itself.
+
+## Layout
 
 ```
-<root>/                         default $IRIMI_HOME/store
+<store>/                        default $IRIMI_STORE, else $IRIMI_HOME/store
   blobs/<sha256-hex>            a redacted body, written once
-  runs/<run_id>/run.json        the RunRecord (trace.run_to_json), rewritten atomically
-  runs/<run_id>/events.jsonl    one event per line, in seq order
-  unattributed/events.jsonl     events whose run_id is trace.UNATTRIBUTED or unusable (below)
-  serve.lock                    empty; a serve holds an exclusive flock on it while it runs
+  runs/<run_id>/run.json        the run record
+  runs/<run_id>/events.jsonl    the run's events, one JSON object per line, in seq order
+  unattributed/events.jsonl     events no usable run claimed
+  serve.lock                    held by the one irimi serve writing this store
 ```
 
-- A **run id** is also a directory name, so it must match `^[A-Za-z0-9_-]{1,64}$`
-  (`trace.RUN_ID_PATTERN`, `trace.is_valid_run_id`). An `Irimi-Run` header whose value does not
-  match is treated as absent, and the exchange falls back to the engine's own run id.
-- A **body** is stored once, as `blobs/<sha256 of its bytes>`, and never inline in a record. An
-  exchange names it with a body ref. An empty body stores nothing, and its ref is `null`.
-- `unattributed/events.jsonl` holds every kind of event, tool calls included (#76), not only
-  exchanges. It has no `run.json`: see Versioning for the version its lines are read under.
-- **A run id the store cannot use as a directory goes to `unattributed/`**, and an exchange among
-  those events gains the flag `bad-run-id` (`exchange.BAD_RUN_ID_FLAG`). That is an id
-  `trace.is_valid_run_id` refuses - the store checks again rather than trust its caller - and an
-  id that differs only in case from a run directory already there: `Run1` and `run1` are both
-  valid, and on a case-insensitive filesystem (macOS APFS by default) they would be one directory.
-  The first to reach the store keeps it, so two runs are never merged into one directory. So is
-  any run a replay's store did not make itself - the run it replays, and every other run already
-  in the store: an agent that names its runs itself names the recorded ones again, and no
-  recording is ever written to by a replay. A start or an end posted for one is dropped, and
-  counted (#82). An event whose run id is `unattributed` itself goes there unflagged.
-- The first event of a run id that has no `run.json` creates one, with `attribution: "header"`,
-  `started_at` that event's own, and every other optional field `null`. An event built with no
-  clock (`started_at` `0.0`) leaves it `null` too. With no start, a header run sorted after every
-  run that had one, and `irimi runs list` hid an agent's labelled runs behind its process runs
-  (#72). A start that arrives later rewrites the header run's `run.json` whole, its events kept.
-- **A run that has ended is not started again.** A start for a run whose `run.json` has an
-  `outcome` is dropped and counted on the store, in the health check's `dropped`, and its
-  `run.json` is not rewritten: the run lost nothing, so its `dropped_events` is unchanged (#97).
-- `events.jsonl` is appended one whole line at a time, each in one `write` on an `O_APPEND`
-  descriptor. Nothing is fsynced per line: the blobs and `events.jsonl` files a writer touched are
-  fsynced once it has made 1000 writes (`store.SYNC_EVERY`) since the last sync, whenever its queue
-  has been idle for a second (`store.SYNC_IDLE_S`), when a run ends (its `events.jsonl`), and on
-  close. A `run.json` is fsynced before it is renamed into place, so a crash leaves the old one or
-  the new one, never an empty one. A line the disk refused half-way is cut off again at once - only
-  that line's own bytes, never a line another process appended after it. A final line cut off by a
-  crash is skipped on read, and a store that finds one when it resumes the run - `irimi serve`
-  restarted - truncates it away before it appends, and resumes `seq` after the last line it can
-  read. A blob a crash tore is rewritten by the next event that needs it.
-- One process writes a given run. Several may share a root: run directories never collide, and a
-  blob is the same bytes whoever writes it. `unattributed/events.jsonl` is the one file they share,
-  and there each writer numbers its own lines, so a `seq` may repeat across processes. A serve is
-  what fills that file, every request no run names, so a root has at most one: it holds an
-  exclusive `flock` on `serve.lock` while it runs, a second serve on the root refuses to start, and
-  the kernel releases the lock when the process exits, however it exits (#77). `irimi shadow`
-  takes no lock.
-- Everything under the root is private to its owner: directories `0700`, files `0600`. Redaction
-  hides credentials, not the customers, amounts and messages around them.
-- A body over 8 MiB (`limits.MAX_STORED_BODY`) is redacted whole, then cut: its first 8 MiB are
-  stored, its ref says `truncated: true`, and its exchange carries `body-truncated`. A body over
-  64 MiB (`limits.MAX_REDACTED_BODY`) is not stored at all: its exchange is stored with that body
-  empty and carries `body-truncated`. So a stored body is always a prefix of the whole body after
-  redaction, never half a secret - an empty one when it was too big to redact - and
-  `body-truncated` says when it is not the whole. A streamed body's `stream_chunks` are cut with
-  it, so they still split the body that is stored.
-- **A streamed response** (`text/event-stream`) is recorded as the chunks the agent was sent,
-  joined, with each chunk's length in `stream_chunks` (#71). The engine keeps at most 8 MiB of a
-  stream: the agent still gets every chunk after that, and the exchange carries `stream-truncated`
-  (`exchange.Flag.STREAM_TRUNCATED`). It carries that flag too when the stream ended in an error -
-  an upstream reset, an agent that hung up - and then its response holds what arrived before it.
-  **A stream that is not whole is recorded up to its last complete line**, so a cut never leaves
-  half a character (which would make the body unreadable to redaction) or half a secret. A stream
-  sent with a `Content-Encoding` is recorded decoded, as a buffered body is, and as one chunk
-  (`identity` changes no byte, and keeps its chunks); one that cannot be decoded is recorded
-  empty and flagged `stream-truncated`, never compressed.
-  An upstream that ends its stream by closing the connection, with no chunked framing or length,
-  cannot be told apart from one that reset it: such a stream is recorded whole and unflagged.
-- **A body is decoded only up to 64 MiB** (`limits.MAX_DECODED_BODY`, #94). A few KB of gzip, br or
-  zstd can decode to gigabytes, so each codec stops there. A body cut there is never redacted
-  whole, so it is recorded empty, as a body over 64 MiB always is, and its exchange carries
-  `body-truncated`: the start of a JSON document is not JSON, and redaction would read it line by
-  line. A stream cut there is recorded as its first 8 MiB, kept to their last complete line, as
-  any stream that is not whole is, and carries `stream-truncated`. Whatever irimi forwards still
-  carries every byte it was sent, and the overlay never edits such a read: one the run has a write
-  for is `overlay: "partial"`, as a body the overlay cannot parse is. A write is never
-  answered from part of its request body: one whose body was cut is answered with irimi's own
-  `502`, recorded under its classification as `answered_by: "irimi"`, flagged `decision-failed`
-  and `body-truncated`;
-  the control endpoint refuses one `413`. Only gzip, deflate (and `deflateraw`), br, zstd and the
-  identities (`identity`, `none`) are decoded; a body in any other `Content-Encoding` is recorded
-  as it came, and a stream in one is recorded empty and flagged, as above.
-- Everything is redacted before it reaches disk (#69): see Redaction. A credential in the example
-  below appears as a `<redacted:…>` placeholder for that reason.
+- **A run id** is also a directory name, so it matches `^[A-Za-z0-9_-]{1,64}$`. An `Irimi-Run`
+  header that does not match is treated as absent.
+- **Events with no usable run** go to `unattributed/events.jsonl`, which has no `run.json`. That
+  covers the run id `unattributed`, an id the store cannot use as a directory, and an id that
+  differs only in case from a run directory already present (on a case-insensitive filesystem the
+  two would be one directory). An exchange filed there for its id carries the flag `bad-run-id`.
+- **A header run.** The first event for a run id with no `run.json` creates one, with
+  `attribution: "header"`, `started_at` that event's own (or `null` for an event built with no
+  clock, whose `started_at` is `0.0`), and every other optional field `null`.
+  A start that arrives later rewrites the record whole, keeping its events.
+- **An ended run is not started again.** A start for a run whose `run.json` has an `outcome` is
+  dropped, and the record is unchanged.
+- **Runs written by a replay** name the run they replayed in `replay_of`. A replay never writes to
+  a run it did not make.
 
-## Redaction
+## Bodies
 
-The store writes `redact.redact_exchange(exchange, key)`, never the exchange the engine answered
-with, and passes a trigger's name and args, a tool call's args and result, and every error's type
-and message (a run's and a tool call's) through `redact.redact_json`.
-Redaction is always on; there is no switch and no per-repo rule in Phase 3.
+A body is never inline in a record. It is stored once, as `blobs/<sha256 of its bytes>`, and named
+by a [body ref](#body-ref). An empty body stores nothing, and its ref is `null`.
 
-- **A placeholder** is `<redacted:` + the first 16 hex digits of HMAC-SHA256(key, value) + `>`.
-  The key is `$IRIMI_HOME/redact.key`, 32 random bytes created 0600 on first use (in a home
-  created 0700 if it is missing), so one secret is always one placeholder on one install, and a
-  replay matches a secret against its own placeholder. A symlink to the key is followed, so two
-  installs can be given one key (a mounted secret). A `redact.key` that does not lead to a regular
-  file of 32 bytes - a directory, a dangling symlink, a short file - is refused, never replaced.
-- **Headers.** A credential header's whole value is replaced (`redact.is_credential_header`, the
-  rule an answer target's request is stripped by), and so is `Set-Cookie` on a response. A value
-  that is an absolute `http(s)` URL (`Location`, `Referer`) is redacted as a URL: its query and
-  fragment as a query string, its path by its own host's rules.
-- **Secret keys.** A query parameter, a form field (each by its last non-empty bracket segment,
-  so `card[token]` and `token[]`) or a JSON object key at any depth named `api_key`, `apikey`,
-  `secret`, `client_secret`, `password`, `access_token`, `refresh_token`, `id_token` or `token` -
-  compared whole and case-insensitively, so `max_tokens` is not one - has its value replaced. A
-  value that is not a string is replaced by the placeholder of its JSON with sorted keys. `null`
-  and `""` hide nothing and are left as they are.
-- **Secret shapes.** Stripe, Slack, GitHub, AWS, Anthropic and OpenAI key shapes
-  (`secret_shapes.SECRET_PATTERNS`) are replaced wherever they appear: header names and values, the
-  path, the query string and a form body (names and values), JSON strings and keys, every line of
-  a text body (SSE included), `target` and `operation`. A shape glued to a preceding letter or
-  digit (`task_test_runner`) is part of a word and is left alone, unless that letter or digit ends
-  an escape - `\n`, `\t`, `\r`, `\b`, `\f`, `\uXXXX` or `%XX` - which is how text stored raw
-  spells a separator (`key:\nsk_live_…`, `/Bearer%20sk_live_…`).
-- **Credential-path hosts.** On `hooks.slack.com` (compared without a root dot, so
-  `hooks.slack.com.` too) the path is the secret, so the whole path is replaced: in the request,
-  in a delegated exchange's `target`, in a header URL that points there, and in the `operation`
-  of a request no route matched, which is named `METHOD /path`. Any other place the exchange
-  carries that path - a body, binary or not, or a header value, the path as sent or as the shape
-  rule left it - has it replaced too: irimi's own 502 for an unreachable answer target names the
-  target's URL. A path of `/` alone is left alone there.
-- **How a body is read.** A body that is one JSON document (after a byte-order mark, which is kept)
-  is walked as JSON, whatever its content type claims, a form's included. Otherwise a form content
-  type is read as a form. Otherwise the body is read line by line, a line ending at CRLF, LF or a
-  lone CR as an SSE line does: a line that is one JSON document (NDJSON), or an SSE `data:` field
-  whose value is one, is walked as JSON, and every other line is scanned for shapes.
-- **Bytes are kept when nothing matched.** A body is re-serialized only when a rule changed it: a
-  JSON document compactly, with `ensure_ascii=False` (a JSON line alone, its `data:` prefix and
-  line ending kept), a form body pair by pair.
-- **A streamed body is redacted joined, never chunk by chunk**, so a secret split across two
-  chunks is still one line. Its `stream_chunks` are then recomputed over the redacted body, line
-  by line: a boundary in a line redaction left alone keeps its place, one in a line it changed
-  moves to the end of that line, and two boundaries that land together make one chunk. When the
-  redacted body does not have the same lines - it was one JSON document, or could not be
-  redacted - it is one chunk. So `stream_chunks` always splits the body that is stored.
-- **An error is redacted whole, then cut** to the 300 and 1000 characters a trace keeps of its
-  type and message, so a stored error is a prefix of the redacted whole, as a stored body is: a
-  key across either cut is stored as its own placeholder, or the part of that placeholder the cut
-  keeps, and never as part of the key (#179). The control endpoint hands the store a posted error
-  whole, and the SDK posts an exception's message whole, up to 65,536 characters
-  (`limits.MAX_POSTED_MESSAGE`), and its type up to 1200 (`limits.MAX_POSTED_TYPE`). A run's end
-  waits for the writer with its type and message each cut outside secrets (below) to 4000
-  characters (`limits.MAX_QUEUED_ERROR`), so it costs the store's byte budget nothing and is never
-  dropped by it.
-- **A cut made before redaction is made outside secrets.** Nothing that cuts before the store
-  redacts can redact, so a trigger's name (1000 characters) and a captured `repr` (1000), cut by
-  the SDK, an exception's message and type past what the SDK posts, and an end's error waiting
-  to be written, are cut at their limit, or, when a secret shape runs across it, where that shape
-  starts (`secret_shapes.cut_outside_secrets`, #179). What is kept, redacted, is a prefix of the
-  whole redacted, and only a key across the cut is left out: text with none keeps all it can.
-- **Failure is closed.** A part that cannot be redacted is stored as `<redaction-failed>` (a path as
-  `/<redaction-failed>`), and the exchange gains the flag `redaction-failed`. That includes a
-  JSON body or JSON line the walk cannot see whole: an object with a repeated key, or JSON
-  `json.loads` refuses for a reason other than not being JSON. `redact_json` returns
-  `<redaction-failed>` for a value that is not JSON, such as a tuple.
-
-Known limitations:
-
-- **A body that is not valid UTF-8 is stored unscanned.** A credential inside a binary body
-  reaches disk as it was sent.
-- **JSON that is not a whole document on one line is scanned for shapes only.** A secret key's
-  value is replaced only if it also has a secret shape when its JSON spans several lines of a
-  body that is not one document (a multi-line SSE `data:` field, a truncated document), or is
-  carried inside a JSON string (a streamed tool call's `partial_json`).
-- **A secret a stream sends in pieces is stored in pieces.** Each SSE event is its own line, so a
-  secret whose characters arrive across several `text_delta` events is never whole on any line
-  redaction reads, and each piece reaches disk as it was sent (#92).
-- **The key is per install.** A secret recorded on a production box and on a CI runner gets two
-  different placeholders, so recordings from two machines do not match each other's redacted
-  values. Whether recordings move between machines is a Phase 6 decision (push and pull).
+- **What the bytes are.** The body as the agent sent it or received it, after redaction, decoded
+  from its `Content-Encoding` when that is `gzip`, `deflate`, `br`, `zstd` or `identity`. A body in
+  any other encoding is stored as it came.
+- **Cut bodies.** A body over 8 MiB keeps its first 8 MiB: its ref says `truncated: true` and its
+  exchange carries `body-truncated`. A body that decodes past 64 MiB is stored empty, also flagged
+  `body-truncated`. A stored body is always a prefix of the whole redacted body, never part of a
+  secret.
+- **Streams.** A `text/event-stream` response is stored as the chunks the agent was sent, joined,
+  with each chunk's length in `stream_chunks`. A stream that is not whole (cut past 8 MiB, ended by
+  an error, or not decodable) is stored up to its last complete line and flagged
+  `stream-truncated`; the agent still got every chunk that arrived.
+- **Redaction.** Every value in every record may hold `<redacted:` + 16 hex digits + `>` in place
+  of a secret, or `<redaction-failed>` where a part could not be redacted (the exchange is then
+  flagged `redaction-failed`). The rules are in [security.md](security.md#redaction).
+- **Telemetry** bodies are never stored.
 
 ## Records
 
-Every timestamp is wall-clock seconds since the epoch (`time.time()`), as a finite JSON number.
-An exchange's `started_at` and `ended_at` are `0.0` only on an exchange built with no clock to read
-(a test, or a caller with none); never on one the engine recorded.
+Every timestamp is wall-clock seconds since the epoch, a finite JSON number. Every field in the
+tables is present in every record; "or `null`" says when its value may be `null`.
 
-### `run.json`: the run record (`trace.RunRecord`)
+### Run record
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `schema_version` | integer | The format version this run was written in. `3` here; a run written in `2` reads unchanged, and one written in `1` reads as one that is no replay. |
-| `run_id` | string | The run's id; also its directory name. |
-| `mode` | `"shadow"`, `"replay"` | `replay` is a run a replay answered from a stored run (#82). |
-| `attribution` | `"process"`, `"sdk"`, `"header"` | How the run came to exist. `process` is the `irimi shadow -- <cmd>` run. `sdk` is a run the SDK started around a trigger, by posting its start to the control endpoint (#73). `header` is a run id that arrived on exchanges with no start event. |
-| `trigger` | trigger or `null` | What started the run. `null` for a `header` run. |
-| `agent_version` | string or `null` | The agent's own version, from `IRIMI_AGENT_VERSION`. |
-| `engine_version` | string | The irimi that recorded the run. |
-| `sdk_version` | string or `null` | The SDK that started the run. `null` for a run it did not start. |
-| `started_at` | number or `null` | When the run started. For a `header` run, when the event that created it started. |
-| `ended_at` | number or `null` | When the run ended. |
-| `outcome` | `"ok"`, `"error"` or `null` | `null` means the run is incomplete: it never ended, or irimi stopped first. |
-| `error` | error or `null` | Why the run failed, when `outcome` is `"error"`. |
-| `exit_code` | integer or `null` | The child's exit code, set only for the `process` run. |
-| `dropped_events` | integer | Events the store could not write. `0` means the run is whole. |
-| `replay_of` | string or `null` | Added in v2 (#82). The run a replay answered this one from; `null` for a run that is no replay. A run id, as `run_id` is (`trace.is_valid_run_id`), set exactly when `mode` is `replay`: a record holding anything else is refused (#167). |
+`run.json` (`trace.RunRecord`):
 
-A **trigger** (`trace.Trigger`):
+| Field | Type | Since | Meaning |
+| --- | --- | --- | --- |
+| `schema_version` | integer | 2 | The format version this run was written in. |
+| `run_id` | string | 2 | The run's id; also its directory name. |
+| `mode` | [mode](#vocabularies) | 2 | `replay` for a run a replay wrote, else `shadow`. |
+| `attribution` | [attribution](#vocabularies) | 2 | How the run came to exist. |
+| `trigger` | trigger or `null` | 2 | What started the run. `null` for a `header` run. |
+| `agent_version` | string or `null` | 2 | The agent's own version, from `IRIMI_AGENT_VERSION`. |
+| `engine_version` | string | 2 | The irimi that recorded the run. |
+| `sdk_version` | string or `null` | 2 | The SDK that started the run; `null` for a run it did not start. |
+| `started_at` | number or `null` | 2 | When the run started; for a `header` run, when its first event started. |
+| `ended_at` | number or `null` | 2 | When the run ended. `null` together with `outcome`. |
+| `outcome` | [outcome](#vocabularies) or `null` | 2 | `null` means the run never ended, or irimi stopped first. |
+| `error` | error or `null` | 2 | Why the run failed, when `outcome` is `error`. |
+| `exit_code` | integer or `null` | 2 | The child's exit code; set only for a `process` run that ended. |
+| `dropped_events` | integer | 2 | Events the store could not write. `0` means the run is whole. |
+| `replay_of` | string or `null` | 2 | The run a replay answered this one from; set exactly when `mode` is `replay`. |
 
-| Field | Type | Meaning |
-| --- | --- | --- |
-| `name` | string | The display name. |
-| `entrypoint` | string or `null` | `module:qualname` of the wrapped function. `null` for a context-manager run and for the process run. |
-| `args` | any JSON | The captured arguments: see [Captured arguments](#captured-arguments). |
-| `replayable` | boolean | Whether `args` captured everything needed to call `entrypoint` again. |
+### Trigger
 
-An **error** (`trace.ErrorInfo`) is `{"type": string, "message": string}`. `type` is the
-exception's `module.qualname`, at most 300 characters (`limits.MAX_ERROR_TYPE`, #99), and
-`message` is at most 1000 (`limits.MAX_ERROR_MESSAGE`). The store cuts both, each once it has
-redacted the whole of it (see Redaction, #179).
+A run's `trigger` (`trace.Trigger`):
+
+| Field | Type | Since | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | 2 | The display name: a trigger's name, or a process run's program. |
+| `entrypoint` | string or `null` | 2 | `module:qualname` of the function that started the run; `null` for an `sdk.run` block and a process run. |
+| `args` | any JSON | 2 | The [captured arguments](#captured-arguments); for a process run, `{"argv": [...]}`, its command line. |
+| `replayable` | boolean | 2 | Whether `args` holds everything needed to call `entrypoint` again. |
+
+### Error
+
+A run's or tool call's `error` (`trace.ErrorInfo`):
+
+| Field | Type | Since | Meaning |
+| --- | --- | --- | --- |
+| `type` | string | 2 | The exception's `module.qualname`, at most 300 characters. |
+| `message` | string | 2 | Its `str()`, at most 1000 characters. |
+
+Both are redacted whole and only then cut.
 
 ### Captured arguments
 
-An `sdk` run's `trigger.args` are what the SDK captured (#74, `irimi.sdk._capture`). For
-`@sdk.trigger` they are the call's arguments bound to the function's parameters,
-`{"param": value}`: a method's or classmethod's first parameter named `self` or `cls` is left
-out (a plain function's or a static method's is kept, #84), and defaults are not applied. A call that does not bind is captured as `{"args": [...], "kwargs": {...}}` and is not
-replayable. For `sdk.run(name, inputs=value)` they are `value`. Each value is captured by the first row
-that matches it, and `replayable` is true only when every part of it was captured by a replayable
-row:
+A trigger's `args`, and a tool call's `args` and `result`, are values captured as JSON. A
+function's arguments are bound to its parameters, `{"param": value}`, leaving out a method's
+`self` or `cls` and not applying defaults; a call that does not bind is captured as
+`{"args": [...], "kwargs": {...}}` and is not replayable. `sdk.run(name, inputs=value)` captures
+`value`. Each value is captured by the first row that matches it, and is replayable only when every
+part of it was captured by a replayable row:
 
 | Value | Captured as | Replayable |
 | --- | --- | --- |
 | `None`, `bool`, `int`, `str`, finite `float` | itself | yes |
 | non-finite `float` | `{"__irimi_repr__": "nan"}` (or `"inf"`, `"-inf"`) | no |
-| `list`, `tuple` | a JSON list: a tuple becomes a list | when every item is |
+| `list`, `tuple` | a JSON list | when every item is |
 | `dict` whose every key is a `str` | a JSON object | when every value is |
-| `dict` with any other key | `{"__irimi_repr__": repr(v)}`, the repr cut to 1000 characters outside secrets (see Redaction) | no |
-| dataclass instance | `{"__irimi_type__": "module:qualname", "value": <its init=True fields, captured>}` | when every field is, and its class can be imported |
+| `dict` with any other key | `{"__irimi_repr__": repr(v)}` | no |
+| dataclass instance | `{"__irimi_type__": "module:qualname", "value": <its init fields, captured>}` | when every field is, and its class can be imported |
 | object with a callable `model_dump` (pydantic v2) | `{"__irimi_type__": "module:qualname", "value": <v.model_dump(mode="json"), captured>}` | the same |
 | `bytes` | `{"__irimi_bytes__": <base64>}` | yes |
-| anything else | `{"__irimi_repr__": repr(v)}`, cut as above, or `"<unrepresentable {type}>"` in place of the repr when `repr` raises | no |
+| anything else | `{"__irimi_repr__": repr(v)}`, or `"<unrepresentable {type}>"` when `repr` raises | no |
 
 - **Types match exactly.** An `IntEnum`, a namedtuple, an `OrderedDict` or a `bytearray` is
-  "anything else", because replay (#84) would rebuild the base type rather than the value the
-  trigger was given. An `int` too long to write as JSON is `"<unrepresentable int>"`.
-- **The markers are reserved.** A `dict` holding `__irimi_repr__`, `__irimi_type__`,
-  `__irimi_bytes__` or `__irimi_truncated__` as a key of its own is captured by its repr, so a
-  marker in `args` was always written by capture.
+  "anything else", since rebuilding the base type would not give back the value. An `int` too long
+  to write as JSON is `"<unrepresentable int>"`.
+- **The markers are reserved.** A `dict` with `__irimi_repr__`, `__irimi_type__`, `__irimi_bytes__`
+  or `__irimi_truncated__` as a key of its own is captured by its repr, so a marker in a captured
+  value was always written by capture.
 - **A description is not the value.** `__irimi_repr__` and `__irimi_truncated__` say what a value
-  was, not what it is, wherever they appear in it. They are part of this format, not of the SDK
-  alone: `trace.REPR_KEY`, `trace.TRUNCATED_KEY` (`trace.DESCRIPTION_KEYS`), and
-  `trace.holds_description(value)` says whether a captured value holds either anywhere. A replay
-  never hands such a value back as the value: neither a recording (`replay.index.ReplayIndex`) nor the
-  SDK's `revive` does (#83).
-- **Importable classes only.** A dataclass or model defined inside a function (`<locals>` in its
-  qualname), or in `__main__`, which is another module in the process that replays it, cannot be
-  imported to rebuild it, so it is not replayable.
-- **Depth.** A value inside more than 32 containers is `{"__irimi_repr__": "<too deep>"}`, not
-  replayable. For `@sdk.trigger`, depth counts from each parameter's value, so a parameter may
-  nest as deep as a value given to `sdk.run(name, inputs=...)`.
-- **Size.** Captured args that would be more than 1 MiB of JSON are replaced, whole, by
-  `{"__irimi_truncated__": true, "bytes": n}`, not replayable. Capture counts as it goes and stops
-  as soon as it passes the limit, so for a value that holds one object many times over `n` is the
-  count when it stopped, already past 1 MiB, rather than the full size.
-- **Never raises.** A `repr` or a `model_dump` that raises captures that one value as its
-  `__irimi_repr__`, never the agent's error.
-- **Redacted on disk.** The store redacts `args` like any JSON it keeps (see
-  [Redaction](#redaction)), so a replay gets placeholders where secrets were.
+  was, wherever they appear in it; a replay never hands such a value back as the value.
+- **Importable classes only.** A class defined inside a function, or in `__main__`, cannot be
+  imported to rebuild it, so its instances are not replayable.
+- **Depth.** A value inside more than 32 containers is `{"__irimi_repr__": "<too deep>"}`.
+- **Size.** A repr is cut to 1000 characters outside any secret's shape. Captured `args` over 1 MiB
+  of JSON are replaced whole by `{"__irimi_truncated__": true, "bytes": n}`, where `n` is the size
+  capture had reached when it stopped; so is a tool call's `result` when `args` and `result`
+  together pass 1 MiB. Neither is replayable.
 
-### `events.jsonl`: one event per line
+### Events
 
-Every line is a JSON object with `seq` and `type` first, then the fields of the record `type`
-names:
+Each line of `events.jsonl` is a JSON object: `seq`, then `type` ([event type](#vocabularies)),
+then the fields of the record `type` names.
 
 ```
 {"seq": <integer>, "type": "exchange" | "tool_call" | "telemetry", ...fields}
 ```
 
-**An `exchange`** (`irimi.core.exchange.Exchange`) is one HTTP exchange irimi saw or made.
+`seq` numbers a run's events in the order the store received each finished event, so it is
+completion order; `started_at` recovers start order. A write that waits on irimi's check read
+starts first and finishes last, so the check read's `seq` is lower. In `unattributed/events.jsonl`
+each process writing the file numbers its own lines, so a `seq` may repeat there.
 
-| Field | Type | Meaning |
+### `exchange`
+
+One HTTP exchange irimi saw or made (`irimi.core.exchange.Exchange`):
+
+| Field | Type | Since | Meaning |
+| --- | --- | --- | --- |
+| `run_id` | string | 2 | The run it belongs to. |
+| `service` | string | 2 | The service its map names, or its host when no map claims it. |
+| `operation` | string | 2 | The route's operation (`refunds.create`), or `METHOD /path` when no route matched; `""` for a request irimi could not parse, or whose decision failed. |
+| `kind` | [kind](#vocabularies) | 2 | What the request is. |
+| `answered_by` | [answered by](#vocabularies) | 2 | Who produced the response the agent got. |
+| `door` | [door](#vocabularies) | 2 | How the request reached irimi. |
+| `issued_by` | [issued by](#vocabularies) | 2 | `engine` for irimi's check read. |
+| `target` | string | 2 | The target URL a `delegated` exchange was sent to, or the one an `irimi` exchange flagged `target-failed` could not reach; `""` otherwise. |
+| `flags` | list of [flags](#flags) | 2 | Facts about this exchange. |
+| `overlay` | [overlay](#vocabularies) or `null` | 2 | How much of the run's faked writes this read could show; `null` when the overlay did not consider it. |
+| `precondition` | [precondition](#vocabularies) or `null` | 2 | What the precondition check said before this write was faked; `null` when nothing was asked. |
+| `rejection_code` | string | 2 | The service's code for a rejected write; `""` otherwise. |
+| `would_fire` | list of strings | 2 | The webhooks an accepted faked write would have made the service send, from its route's `fires:`. |
+| `currency` | string | 2 | The currency irimi's check read found; `""` when there was none. |
+| `started_at` | number | 2 | When irimi parsed the request. |
+| `ended_at` | number | 2 | When irimi finished the exchange; never before `started_at`. |
+| `request` | request | 2 | What was asked, as irimi forwarded and recorded it, without `Irimi-Run`. |
+| `response` | response or `null` | 2 | What came back; `null` when nothing did (a lost connection, an unreachable target). |
+| `stream_chunks` | list of integers | 2 | The byte length of each chunk of a streamed response, in arrival order, summing to the stored body's length; `[]` when the response did not stream or its stored body is empty. |
+
+### Request
+
+An exchange's `request` (`exchange.Request`):
+
+| Field | Type | Since | Meaning |
+| --- | --- | --- | --- |
+| `method` | string | 2 | Upper case. |
+| `scheme` | string | 2 | `http` or `https`. |
+| `host` | string | 2 | Lower case, without the port. |
+| `port` | integer | 2 | The port. |
+| `path` | string | 2 | Starts with `/`; no query. |
+| `query` | string | 2 | The raw query string, without the `?`; `""` for none. |
+| `headers` | list of pairs | 2 | `[name, value]` pairs, names lower case, in the order sent. |
+| `body` | body ref or `null` | 2 | The request body. |
+
+### Response
+
+An exchange's `response` (`exchange.Response`):
+
+| Field | Type | Since | Meaning |
+| --- | --- | --- | --- |
+| `status` | integer | 2 | The HTTP status. |
+| `headers` | list of pairs | 2 | `[name, value]` pairs, as the service sent them; repeats (`set-cookie`) kept. |
+| `body` | body ref or `null` | 2 | The response body. |
+
+### Body ref
+
+A request's or response's `body` (`trace.BodyRef`):
+
+| Field | Type | Since | Meaning |
+| --- | --- | --- | --- |
+| `sha256` | string | 2 | 64 lower-case hex digits: the file under `blobs/`. |
+| `size` | integer | 2 | The stored length in bytes. |
+| `truncated` | boolean | 2 | The stored bytes are only the start of the body. |
+
+### `tool_call`
+
+A tool call the proxy cannot see, reported by the SDK (`trace.ToolCall`):
+
+| Field | Type | Since | Meaning |
+| --- | --- | --- | --- |
+| `tool_call_id` | string | 2 | Its id, unique in the run. |
+| `run_id` | string | 2 | The run it was made in; else the process run; else `unattributed`. |
+| `name` | string | 2 | The tool's name: its `name=`, or the function's `module:qualname`. |
+| `kind` | [tool kind](#vocabularies) | 2 | What the tool does. |
+| `ran` | [ran](#vocabularies) | 2 | Which body ran. |
+| `args` | any JSON | 2 | What it was called with, bound against the real function's signature and [captured](#captured-arguments). |
+| `result` | any JSON | 2 | What it returned, captured the same way; `null` when it raised. |
+| `error` | error or `null` | 2 | What it raised. A call stopped from outside (its task cancelled, its coroutine closed) records `asyncio.exceptions.CancelledError` or `builtins.GeneratorExit`, which a replay never hands back. |
+| `started_at` | number | 2 | When the call began. |
+| `ended_at` | number | 2 | When it returned or raised. |
+| `awaited` | boolean | 2 | `true` for a sync tool that returned a coroutine: the call ended when the coroutine did, and `result` and `error` are the coroutine's. |
+
+### `telemetry`
+
+One telemetry exchange, recorded only as having happened (`trace.TelemetrySeen`):
+
+| Field | Type | Since | Meaning |
+| --- | --- | --- | --- |
+| `run_id` | string | 2 | The run it belongs to. |
+| `host` | string | 2 | The host it was sent to. |
+| `started_at` | number | 2 | When it started. |
+
+## Vocabularies
+
+Each of these fields holds one of a closed set of values. A reader refuses a value it does not
+know.
+
+`mode` (`trace.Mode`):
+
+| Value | Since | Meaning |
 | --- | --- | --- |
-| `run_id` | string | The run it belongs to. |
-| `service` | string | The service its map names, or its host when no map claims it. |
-| `operation` | string | The route's operation (`refunds.create`), or `METHOD /path` when no route matched. `""` when irimi refused a request it could not parse, flagged `refused`, or its classify/answer decision itself failed, flagged `decision-failed` (`classify.unclassified`). |
-| `kind` | `read`, `write`, `llm`, `telemetry`, `unknown` | What the classifier said it is. |
-| `answered_by` | `live`, `fake-L0`, `fake-L1`, `delegated`, `overlay`, `recording`, `irimi` | Who produced the response the agent got. `irimi` (v3) is an error irimi answered with itself, as JSON `{"error": {"type", "message"}}`, and its flags say why: `refused`, `decision-failed` or `target-failed`. `recording` (v2, #82) is an answer the service gave a stored run, which a replay sent again: a read, an llm call, or a precondition read. Anything else a replay answers from the stored run keeps the value it was recorded with, and every such exchange is flagged `from-recording`. |
-| `door` | `forward`, `reverse` | Which door it came in by. |
-| `issued_by` | `agent`, `engine` | `engine` is a read irimi made on its own account, the L3 precondition read. |
-| `target` | string | The address of the answer target a `delegated` exchange was pointed at, or the one an `irimi` exchange flagged `target-failed` could not reach or apply. `""` otherwise. |
-| `flags` | list of strings | Facts about this exchange, each a value of `exchange.Flag`. |
-| `overlay` | `full`, `partial` or `null` | How much of the run's faked writes the overlay could show in this read. `null` when it did not consider it. |
-| `precondition` | `passed`, `rejected`, `not_evaluable` or `null` | What L3 said about this write before it was faked. `null` when nothing was asked. |
-| `rejection_code` | string | The service's code for an L3 rejection. `""` otherwise. |
-| `would_fire` | list of strings | The webhooks an accepted, faked write would have made the service send. |
-| `currency` | string | The currency the write's L3 read found. `""` when there was no such read. |
-| `started_at` | number | When irimi first parsed the request. An engine-issued read spans its `Reader` call. |
-| `ended_at` | number | When irimi finished the exchange. `started_at <= ended_at`. |
-| `request` | request | What was asked, as irimi forwarded and recorded it. |
-| `response` | response or `null` | What came back. `null` when nothing did: an upstream lost before its headers, an unreachable target. |
-| `stream_chunks` | list of integers | Added in #71. The byte length of each chunk of a streamed response, in arrival order: they sum to the stored response body's length, and none is 0. `[]` for a response that did not stream, and for a stored body that is empty: there is nothing to split. |
+| `shadow` | 2 | A run under `irimi shadow` or `irimi serve`. |
+| `replay` | 2 | A run `irimi replay` wrote; `replay_of` names the run it replayed. |
 
-A **request** is `method`, `scheme`, `host`, `port` (integer), `path`, `query` (without the `?`),
-`headers` and `body`. A **response** is `status` (integer), `headers` and `body`.
+`attribution` (`trace.Attribution`):
 
-- `headers` is a list of `[name, value]` pairs, not an object: order and repeats (`set-cookie`) are
-  part of what was sent. A request's names are lower-case; a response's are as the service sent
-  them.
-- `body` is a **body ref**, `{"sha256": string, "size": integer, "truncated": boolean}`, or `null`
-  for an empty body. `sha256` names the file under `blobs/` and is 64 lower-case hex digits.
-  `size` is the stored length. `truncated` says the stored bytes are only the start of the body.
-- The decoder hands the whole ref to the store's `get_body`, but a decoded `Exchange` carries only
-  the bytes it returns: `size` and `truncated` do not survive decoding. So the store that cuts a
-  body also flags its exchange `body-truncated` (`exchange.Flag.BODY_TRUNCATED`, #70).
-
-**A `tool_call`** (`trace.ToolCall`) is a tool call the proxy cannot see, reported by the SDK.
-
-| Field | Type | Meaning |
+| Value | Since | Meaning |
 | --- | --- | --- |
-| `tool_call_id` | string | Its id, unique in the run. |
-| `run_id` | string | The run it belongs to: the run it was made in, else the process run (`IRIMI_RUN`), else `unattributed`. |
-| `name` | string | The tool's name: `name=` given to `@sdk.read_tool` or `@sdk.write_tool`, or the function's `module:qualname` (#76). |
-| `kind` | `read`, `write` | What the tool does. |
-| `ran` | `real`, `shadow`, `recording` | `real` ran the function; `shadow` ran its shadow stand-in; `recording` (v2) was answered from the run a replay replays: a read tool whose recorded outcome was handed back, its body never run (#83). In a replay's run, a read tool's `real` is that replay's miss, as `replay-miss` is an exchange's. |
-| `args` | any JSON | What it was called with, bound against the real function's signature and captured as a trigger's are ([Captured arguments](#captured-arguments)). |
-| `result` | any JSON | What it returned, captured the same way. `null` when it raised. A result that would take `args` and `result` together past 1 MiB is `{"__irimi_truncated__": true, "bytes": n}`. |
-| `error` | error or `null` | What it raised. A call something outside it stopped before it finished, its task cancelled or its coroutine closed unawaited, records `asyncio.exceptions.CancelledError` or `builtins.GeneratorExit` (`trace.STOPPED_ERROR_TYPES`): no outcome of the tool's own, so a replay never answers with it (#83). |
-| `started_at` | number | When the call began. |
-| `ended_at` | number | When it returned or raised. |
-| `awaited` | boolean | Added in #83. `true` for a sync tool that returned a coroutine: the call ended when the coroutine did, and `result` and `error` are the coroutine's, so a replay that answers it from the recording hands the agent a coroutine again. `false` for any other call. |
+| `process` | 2 | The run `irimi shadow -- <cmd>` or `irimi replay` stores for its child process. |
+| `sdk` | 2 | A run the SDK started: a `@sdk.trigger` call or an `sdk.run` block. |
+| `header` | 2 | A run id seen on requests (`Irimi-Run`) with no start. |
 
-**A `telemetry`** event (`trace.TelemetrySeen`) records only that one telemetry exchange happened:
-`run_id`, `host` and `started_at`. Telemetry is forwarded, and its requests and responses are never
-stored.
+`outcome` (`trace.RunStatus`):
 
-## Ordering
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `ok` | 2 | The run ended normally. |
+| `error` | 2 | The trigger raised, or the process exited non-zero; `error` or `exit_code` says how. |
 
-Events in a run are ordered by `seq`, which the store assigns as it receives each finished event,
-so `seq` is completion order. `started_at` recovers start order.
+`kind` (`exchange.Kind`):
 
-A write that waits on its own precondition read shows both. In the example below, the refund
-starts first and finishes last, so its precondition read is `seq` 1 and the refund is `seq` 2.
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `read` | 2 | Forwarded to the real service. |
+| `write` | 2 | Answered by irimi or a target; never forwarded. |
+| `llm` | 2 | An LLM call, forwarded to the real service. |
+| `telemetry` | 2 | Observability traffic, forwarded and stored only as a `telemetry` event. |
+| `unknown` | 2 | Nothing classified it; answered by irimi as a presumed write. |
 
-## Reading a run back
+`answered_by` (`exchange.AnsweredBy`):
 
-`irimi runs list` prints one line per stored run, newest first, and `irimi runs show RUN_ID` prints
-one run: its record, every event in `seq` order, and its summary (#72). That summary is
-`report.summary.summary_lines`, the same code that prints the live one, fed the run's exchanges,
-one host per `TelemetrySeen`, each counted as forwarded live because telemetry always is, and its
-tool calls, each write whose stand-in ran printed as a line after the writes (#76), in the order
-the calls ended, as the live one prints them whatever order their posts came in (#120). It
-equals the block `irimi shadow` printed on exit except in five places:
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `live` | 2 | The real service; the agent got its bytes unchanged. |
+| `fake-L0` | 2 | irimi faked the write with an echo of its fields. |
+| `fake-L1` | 2 | irimi faked the write from a fixture. |
+| `delegated` | 2 | A target answered. |
+| `overlay` | 2 | The real service answered, and irimi applied the run's faked writes to the body. |
+| `recording` | 2 | A replay sent again what the service answered the stored run. Other answers a replay takes from the recording keep their recorded value and carry `from-recording`. |
+| `irimi` | 3 | irimi's own error, `{"error": {"type": ..., "message": ...}}`; its flags say why: `refused`, `decision-failed` or `target-failed`. |
 
-- **The elapsed seconds.** The live summary times the child; a stored one is the run's
-  `ended_at - started_at`, never negative, or `0.0` when either is `null`.
-- **A field redaction replaced.** A write line's `human:` template renders the stored request, so
-  a field whose value was a secret prints as its placeholder.
-- **A write no route matched on a credential-path host.** Its line spells out the request, and
-  the stored path is a placeholder (`hooks.slack.com`'s webhook path, say). A write a route *did*
-  match there prints the map's sentence as it did live: its path matches no route once stored,
-  so the route is found by the `operation` the exchange recorded (`MapIndex.route_named`). A
-  write irimi refused with its body cut spells out the request live too, so it differs the same
-  way (#112).
-- **A write irimi refused whose body only the store cut.** Its decision raised and its body was
-  past `MAX_STORED_BODY`: live, it prints the map's sentence and `refused by irimi
-  (decision-failed)`; stored, the request it was and `(decision-failed, body-truncated)` (#112).
-- **An event the store dropped.** It is in the live summary and not in the stored one; the run's
-  `dropped_events` says how many, and `runs show` prints it. The unattributed events are not a
-  run and have no `run.json` to count their drops in.
+`door` (`exchange.Door`):
 
-A run a replay stored names the run it replayed (`replay_of`): `runs list` prints
-`replay of <run id>` in its attribution column in place of `process`, the attribution of the one
-run `irimi replay` stores, which alone would list it as an `irimi shadow` process run. Any other
-run a replay's store holds - an `sdk` run, or a `header` run an `Irimi-Run` label made - keeps its
-attribution in front: `header, replay of <run id>`. `runs show` prints `mode: replay` and
-`replay of: <run id>` under the attribution, and opens the run's summary `irimi replay · run`
-where a shadow run's opens `irimi shadow · run`, so the block names the command that made the run.
-`irimi replay` prints its comparison on exit, never this block (#154).
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `forward` | 2 | Sent through the proxy. |
+| `reverse` | 2 | Sent in base-URL mode, `http://127.0.0.1:PORT/<host>/<path>`. |
 
-`runs show` prints a stored record's text with each control character escaped (`\n`, `\x1b`): an
-error is the agent's own `str(exc)`, and printed raw it could break a line or drive the terminal.
-`runs list` counts each run's exchanges and writes from its events loaded without their bodies
-(`StoreReader.load_run(run_id, bodies=False)`), which still checks every blob exists at its size.
-A run that cannot be read is named with the file its refusal came from, and in an `events.jsonl`
-the line: one that does not parse, one that parses but does not decode, and one whose blob is
-missing alike (#134). A run irimi may not read (`chmod 0`) is one that cannot be read too, with
-the operating system's reason, never `no run`; `runs list` skips it with a warning, as it skips a
-run.json it cannot decode (#142).
+`issued_by` (`exchange.IssuedBy`):
 
-The live summary covers every exchange the proxy saw while the command ran, whatever run each one
-named; a stored run holds only its own events. The two are the same block when the agent sends no
-`Irimi-Run`, because then every exchange is in the process run. An agent that labels its runs
-leaves most of its exchanges in those runs, each its own line in `runs list`, and its process run
-holds only the requests that carried no label. All of a process's runs together, the unattributed
-events included and put back in the order they ended, print the block `irimi shadow` printed; the
-sample workflows hold every scenario to that (`tests/e2e/workflows/test_stored_runs.py`).
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `agent` | 2 | The agent sent it. |
+| `engine` | 2 | irimi's check read, made before faking a write. |
+
+`overlay` (`exchange.OverlayCoverage`):
+
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `full` | 2 | The read shows every faked write it should. |
+| `partial` | 2 | The read is incomplete and irimi could not fix it; set even when the body is unchanged. |
+
+`precondition` (`exchange.PreconditionOutcome`):
+
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `passed` | 2 | The real service would have accepted the write. |
+| `rejected` | 2 | It would have refused it; `rejection_code` says why. |
+| `not_evaluable` | 2 | irimi could not tell; the write was faked. |
+
+A tool call's `kind` (`trace.ToolKind`):
+
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `read` | 2 | A read tool: it runs for real. |
+| `write` | 2 | A write tool: under irimi, its fake runs. |
+
+`ran` (`trace.Ran`):
+
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `real` | 2 | The function ran. In a replay, a read tool's `real` is a miss. |
+| `shadow` | 2 | The write tool's fake ran instead. |
+| `recording` | 2 | A replay answered the read tool from the recording; its body never ran. |
+
+An event's `type` (`trace.EventType`):
+
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `exchange` | 2 | An [exchange](#exchange). |
+| `tool_call` | 2 | A [tool call](#tool_call). |
+| `telemetry` | 2 | A [telemetry](#telemetry) record. |
+
+### Flags
+
+`flags` is open: a reader skips a flag it does not know. Each appears at most once per exchange
+(`exchange.Flag`):
+
+| Value | Since | Meaning |
+| --- | --- | --- |
+| `unclassified` | 2 | No map said what this request is; `kind` is `unknown` and irimi answered it. |
+| `kind-downgraded` | 2 | The scope rule refused a live kind on an unsafe method its route did not name; irimi answered it. |
+| `target-failed` | 2 | A target was chosen and could not be reached or applied; the agent got irimi's `502`. |
+| `decision-failed` | 2 | irimi's decision failed; the agent got irimi's `502` and nothing was forwarded. |
+| `refused` | 3 | irimi refused the request before deciding it: unparseable, unroutable, a base-URL host it does not relay, or a base-URL request it could not rewrite. |
+| `upstream-error` | 2 | A forwarded request lost the real service before it answered. |
+| `fixture-failed` | 2 | The route's fixture could not be read, so the write was answered with an echo. |
+| `idempotent-replay` | 2 | A retry with a used idempotency key and the same parameters; it got the first answer again. |
+| `idempotency-conflict` | 2 | A used idempotency key with other parameters; it got the service's idempotency error. |
+| `redaction-failed` | 2 | Part of this record could not be redacted and is stored as `<redaction-failed>`. |
+| `body-truncated` | 2 | A stored body is cut or empty; the bytes the agent got were whole. |
+| `bad-run-id` | 2 | The run id could not name a directory, so the exchange is in `unattributed/`. |
+| `stream-truncated` | 2 | The stored stream is incomplete; the agent got every chunk that arrived. |
+| `replay-miss` | 2 | A replay found no recorded answer and decided the request as shadow mode would. |
+| `from-recording` | 2 | A replay answered from the recording. |
+
+`would_fire` is open too: its values are event names from a service map.
 
 ## Versioning
 
-`schema_version` is one integer for the whole format, `trace.SCHEMA_VERSION`, carried by
-`run.json`. Event lines carry none.
+- `schema_version`, in `run.json`, is one integer for the whole format. Events carry no version: a
+  reader decodes them with its own vocabulary, which holds every older version's values.
+- A writer never appends to a run whose `run.json` has another `schema_version`, or that it cannot
+  decode. It drops and counts that run's events, and leaves the record as it found it.
+- A decoder refuses a `schema_version` newer than its own, or below 1.
+- A record that is not a JSON object, lacks a field, or holds a value of the wrong type, outside a
+  closed vocabulary or not finite, is refused with `trace.TraceFormatError`, whose message never
+  quotes a whole value. A body ref is handed to the caller's blob reader, and whatever that raises
+  reaches the caller unchanged.
 
-- A run's `events.jsonl` is read under its `run.json`'s version. A writer never appends events to
-  a run whose `run.json` carries a `schema_version` other than its own, or one it cannot decode:
-  damage, which since #167 includes a `replay_of` that is no run id or disagrees with `mode`. It
-  drops and counts that run's events and its end, and leaves the `run.json` as it found it.
-- `unattributed/events.jsonl` has no `run.json`, and is read under the reader's own
-  `trace.SCHEMA_VERSION`.
-- A decoder refuses a `schema_version` greater than its own, or less than 1, with
-  `trace.TraceFormatError`.
-- A decoder ignores a field it does not know, in any record or nested object.
-- **Every field on this page is required.**
-- **A field added later is optional on decode.** When it is absent the decoder gives the field's
-  default. A field added within a version must be one an older reader, which ignores it, still
-  reads correctly without; adding it is not a version bump.
-- **Version 2** added `replay` to `mode`, `recording` to `answered_by` and `ran`, and
-  `replay_of` to the run record.
-- **Version 3** added `irimi` to `answered_by`. A version 2 run reads under it unchanged; there,
-  irimi's own errors are recorded as `fake-L0` flagged `decision-failed`, or `delegated` flagged
-  `target-failed`. An exchange no longer has a `validation` field or `fidelity:*` flags; a reader
-  ignores both in an older run.
-- **These are version bumps:** removing or renaming a field, changing its type or what it means,
-  and adding a value to a closed vocabulary: `mode`, `attribution`, `outcome`, `kind`, `ran`,
-  `answered_by`, `door`, `issued_by`, `overlay`, `precondition`, and an event's
-  `type`. An older reader refuses a vocabulary value it does not know, rather than reading a new
-  mode as an old one.
-- `flags` is open: a reader skips a flag it does not know. `would_fire` is open too, since its
-  values are event names from a service map.
-- A record that is not a JSON object, lacks a required field, or holds a value of the wrong type,
-  outside a closed vocabulary or not finite is a `TraceFormatError`. No decoder raises anything
-  else on a malformed record, with one exception: `trace.exchange_from_json` and
-  `trace.event_from_json` hand every body ref to the caller's `get_body`, and whatever that raises
-  (a blob missing from the caller's store, say) reaches the caller unchanged. However deep or
-  large the refused value, the refusal is still a `TraceFormatError`: its message names a value
-  of the wrong type by its JSON type and never quotes it, and quotes at most the first
-  `trace.MAX_QUOTED` characters of a string (#100). The message is for a person to read, and its
-  wording is not part of this format.
+| Version | Written by | Changes |
+| --- | --- | --- |
+| 2 | irimi 0.1.0 | The first released version. |
+| 3 | irimi 0.2 | Added `irimi` to `answered_by` and the `refused` flag. Removed an exchange's `validation` field and the `fidelity:*` flags, which a reader ignores in a version 2 run. In a version 2 run, irimi's own errors appear as `fake-L0` flagged `decision-failed`, or `delegated` flagged `target-failed`. |
 
 ## Example
 
-One SDK run of a refund agent: the agent refunds a charge, irimi checks the charge before faking
-the refund, the agent marks its order refunded through a wrapped tool call, and its error
-reporter sends one event to Sentry.
+One SDK run recorded by `uv run python scripts/demo.py replay`: an LLM refund agent looks the
+customer up in its own database (a read tool), irimi checks the charge before faking the refund,
+and the agent records its decision through a write tool, whose fake runs. The demo's fake Stripe
+answers plain HTTP on a loopback port, so `scheme` and `port` are not Stripe's. Two events are left
+out (the agent's own read of the charge and its LLM call), and the refund's request headers are
+abridged.
 
 ```json run.json
 {
   "schema_version": 3,
-  "run_id": "4f1c9a2b7d3e8a60",
+  "run_id": "a0b7ded762e9ee2e",
   "mode": "shadow",
   "attribution": "sdk",
   "trigger": {
-    "name": "handle_refund_request",
-    "entrypoint": "agent.handlers:handle_refund_request",
-    "args": {"order_id": "ord_1042"},
+    "name": "examples.replay.agent:handle_ticket",
+    "entrypoint": "examples.replay.agent:handle_ticket",
+    "args": {
+      "ticket": {
+        "__irimi_type__": "examples.replay.agent:Ticket",
+        "value": {"ticket_id": "T-1", "charge": "ch_demo1", "message": "I was charged twice"}
+      }
+    },
     "replayable": true
   },
-  "agent_version": "refund-agent@1.4.0",
-  "engine_version": "0.0.1",
-  "sdk_version": "0.0.1",
-  "started_at": 1790600000.125,
-  "ended_at": 1790600001.875,
+  "agent_version": null,
+  "engine_version": "0.1.0",
+  "sdk_version": "0.1.0",
+  "started_at": 1792803261.616826,
+  "ended_at": 1792803261.737567,
   "outcome": "ok",
   "error": null,
   "exit_code": null,
@@ -474,16 +441,35 @@ reporter sends one event to Sentry.
 }
 ```
 
-On disk each event is one line. They are shown here one per block, indented, to be readable.
+On disk each event is one line; here each is indented to be readable.
 
-The precondition read irimi issued before faking the refund. It started after the refund and
-finished before it:
+The read tool, which ran for real:
 
 ```json events.jsonl
 {
   "seq": 1,
+  "type": "tool_call",
+  "tool_call_id": "fd35abfb55cc5f4d",
+  "run_id": "a0b7ded762e9ee2e",
+  "name": "db.lookup_customer",
+  "kind": "read",
+  "ran": "real",
+  "args": {"charge": "ch_demo1"},
+  "result": {"charge": "ch_demo1", "name": "Ada Lovelace"},
+  "error": null,
+  "started_at": 1792803261.621098,
+  "ended_at": 1792803261.621583,
+  "awaited": false
+}
+```
+
+irimi's check read of the charge, which started after the refund and finished before it:
+
+```json events.jsonl
+{
+  "seq": 4,
   "type": "exchange",
-  "run_id": "4f1c9a2b7d3e8a60",
+  "run_id": "a0b7ded762e9ee2e",
   "service": "stripe",
   "operation": "charges.retrieve",
   "kind": "read",
@@ -497,27 +483,33 @@ finished before it:
   "rejection_code": "",
   "would_fire": [],
   "currency": "",
-  "started_at": 1790600001.3125,
-  "ended_at": 1790600001.5,
+  "started_at": 1792803261.733286,
+  "ended_at": 1792803261.734038,
   "request": {
     "method": "GET",
-    "scheme": "https",
+    "scheme": "http",
     "host": "api.stripe.com",
-    "port": 443,
-    "path": "/v1/charges/ch_3PqA1",
+    "port": 58743,
+    "path": "/v1/charges/ch_demo1",
     "query": "",
     "headers": [
-      ["authorization", "<redacted:9f2c4e1a7b3d5f60>"],
+      ["authorization", "<redacted:7752e97fb967214a>"],
+      ["stripe-version", "2026-08-26.dahlia"],
       ["accept", "application/json"]
     ],
     "body": null
   },
   "response": {
     "status": 200,
-    "headers": [["Content-Type", "application/json"]],
+    "headers": [
+      ["Server", "BaseHTTP/0.6 Python/3.14.6"],
+      ["Date", "Sat, 24 Oct 2026 00:54:21 GMT"],
+      ["content-type", "application/json"],
+      ["content-length", "208"]
+    ],
     "body": {
-      "sha256": "326207aa2b5e05d67ef8e21aaaacfe80cd30e6110917b3bd7c889977b8ac9194",
-      "size": 103,
+      "sha256": "a6b0de1e835d8f626d8d997b0a852449ae15a491813da2140d07234b3e2ee23c",
+      "size": 208,
       "truncated": false
     }
   },
@@ -525,18 +517,18 @@ finished before it:
 }
 ```
 
-The agent's refund, faked at L1 after the check passed:
+The agent's refund, faked from Stripe's fixture once the check passed:
 
 ```json events.jsonl
 {
-  "seq": 2,
+  "seq": 5,
   "type": "exchange",
-  "run_id": "4f1c9a2b7d3e8a60",
+  "run_id": "a0b7ded762e9ee2e",
   "service": "stripe",
   "operation": "refunds.create",
   "kind": "write",
   "answered_by": "fake-L1",
-  "door": "reverse",
+  "door": "forward",
   "issued_by": "agent",
   "target": "",
   "flags": [],
@@ -545,32 +537,35 @@ The agent's refund, faked at L1 after the check passed:
   "rejection_code": "",
   "would_fire": ["refund.created", "charge.refunded"],
   "currency": "usd",
-  "started_at": 1790600001.25,
-  "ended_at": 1790600001.5625,
+  "started_at": 1792803261.73304,
+  "ended_at": 1792803261.7348979,
   "request": {
     "method": "POST",
-    "scheme": "https",
+    "scheme": "http",
     "host": "api.stripe.com",
-    "port": 443,
+    "port": 58743,
     "path": "/v1/refunds",
     "query": "",
     "headers": [
-      ["host", "api.stripe.com"],
-      ["authorization", "<redacted:9f2c4e1a7b3d5f60>"],
-      ["content-type", "application/x-www-form-urlencoded"]
+      ["host", "api.stripe.com:58743"],
+      ["authorization", "<redacted:7752e97fb967214a>"],
+      ["idempotency-key", "da9e2887-d17c-a838-afa9-9276a8840df4"],
+      ["content-type", "application/x-www-form-urlencoded"],
+      ["stripe-version", "2026-08-26.dahlia"],
+      ["content-length", "27"]
     ],
     "body": {
-      "sha256": "865bcafa7aceba593770cf3674e74a400ee0b75dca5f375006e54460d008fe1e",
+      "sha256": "5207a73704b05cf29e30a43d146e112f42a8c58573bd9807ca4242fbcde651ae",
       "size": 27,
       "truncated": false
     }
   },
   "response": {
     "status": 200,
-    "headers": [["content-type", "application/json"]],
+    "headers": [["content-type", "application/json"], ["content-length", "495"]],
     "body": {
-      "sha256": "98408eaa40f18069664e1f12333713775747a7905f04257afa177cda48cdad4d",
-      "size": 126,
+      "sha256": "758a4bdf6fd410843f6d53ebaded9d61003117ee5cb3dc6691d302bcf2dc3986",
+      "size": 495,
       "truncated": false
     }
   },
@@ -578,35 +573,23 @@ The agent's refund, faked at L1 after the check passed:
 }
 ```
 
-The agent's own database write, which the proxy never sees, run as its shadow stand-in:
+The write tool, whose fake ran in place of the agent's database write:
 
 ```json events.jsonl
 {
-  "seq": 3,
+  "seq": 6,
   "type": "tool_call",
-  "tool_call_id": "tc_1",
-  "run_id": "4f1c9a2b7d3e8a60",
-  "name": "db.mark_refunded",
+  "tool_call_id": "e503095a612303bb",
+  "run_id": "a0b7ded762e9ee2e",
+  "name": "db.record_decision",
   "kind": "write",
   "ran": "shadow",
-  "args": {"order_id": "ord_1042", "refund_id": "re_Kd82nQ4xT1bV9mZ3pL6wR0yS"},
-  "result": {"updated": 1},
+  "args": {"ticket_id": "T-1", "decision": {"refund_amount": 4900, "reply": "Refunded 4900."}},
+  "result": {"recorded": false},
   "error": null,
-  "started_at": 1790600001.625,
-  "ended_at": 1790600001.6875,
+  "started_at": 1792803261.735682,
+  "ended_at": 1792803261.7357068,
   "awaited": false
-}
-```
-
-One Sentry envelope, counted and not stored:
-
-```json events.jsonl
-{
-  "seq": 4,
-  "type": "telemetry",
-  "run_id": "4f1c9a2b7d3e8a60",
-  "host": "o0.ingest.sentry.io",
-  "started_at": 1790600001.75
 }
 ```
 
@@ -614,6 +597,6 @@ The three blobs these events name:
 
 | `blobs/…` | Bytes |
 | --- | --- |
-| `326207aa…c9194` | `{"id":"ch_3PqA1","object":"charge","amount":4900,"amount_refunded":0,"currency":"usd","refunded":false}` |
-| `865bcafa…8fe1e` | `charge=ch_3PqA1&amount=4900` |
-| `98408eaa…dad4d` | `{"id":"re_Kd82nQ4xT1bV9mZ3pL6wR0yS","object":"refund","amount":4900,"charge":"ch_3PqA1","currency":"usd","status":"succeeded"}` |
+| `a6b0de1e…ee23c` | `{"id": "ch_demo1", "object": "charge", "amount": 4900, "amount_refunded": 0, "refunded": false, "currency": "usd", "customer": null, "status": "succeeded", "paid": true, "created": 1790000000, "metadata": {}}` |
+| `5207a737…651ae` | `charge=ch_demo1&amount=4900` |
+| `758a4bdf…c3986` | `{"amount": 4900, "balance_transaction": "txn_kYRDGB3FUDFCLA08rTInOvaw", "charge": "ch_demo1", "created": 1792803261, "currency": "usd", "customer": null, "customer_account": null, "destination_details": {"card": {"type": "reversal"}, "type": "card"}, "id": "re_a7CNxM1DbNFjcVBH0Or8Ihpu", "metadata": {}, "object": "refund", "payment_intent": null, "payment_method": null, "reason": null, "receipt_number": null, "source_transfer_reversal": null, "status": "succeeded", "transfer_reversal": null}` |

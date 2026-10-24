@@ -1,10 +1,4 @@
-"""The two files a replay hands between processes.
-
-- The outcome file: the replay's child (`irimi.replay.child`) writes how its call of a trigger
-  ended (`CallResult`), and `irimi replay` ends the replay's run with it.
-- The result file: `irimi replay --result-file` writes what the replay said (`ReplayResult`), and
-  `irimi.testing.replay` reads it back.
-"""
+"""A replay's two files: the child's `CallResult` and `irimi replay --result-file`'s result."""
 
 import json
 from collections.abc import Mapping
@@ -20,27 +14,21 @@ RESULT_FIELDS = ("source_run_id", "replay_run_id", "exit_code", "diverged_at", "
 
 @dataclass(frozen=True)
 class CallResult:
-    """How the child's call ended: `called` False when the call could not be made, `error` why;
-    otherwise what it raised, None when it returned. `cause` is, for a call not made because
-    importing the trigger's module raised, that exception's type (`NotCallable.cause`)."""
+    """How the child's call ended."""
 
-    called: bool
-    error: ErrorInfo | None
-    cause: str | None = None
+    called: bool  # False: the call could not be made, and `error` says why
+    error: ErrorInfo | None  # otherwise what the call raised, or None
+    cause: str | None = None  # `NotCallable.cause`
 
 
 @dataclass(frozen=True)
 class ReplayResult:
-    """What one replay said, as `irimi.testing.replay` returns it.
-
-    `same` is true when the replay made the same writes as the recording, and `str(result)` is
-    what `irimi replay` printed, so `assert result.same, result` shows the difference.
+    """One replay's result, as `irimi.testing.replay` returns it; `str()` gives the printed lines.
 
     Attributes:
         source_run_id: The stored run that was replayed.
         replay_run_id: The run the replay stored, or None when it was refused before it ran.
-        exit_code: `irimi replay`'s exit code: 0 the same writes, 1 any differ, 2 a replay that
-            could not run or call its trigger, 130 or 143 one SIGINT or SIGTERM stopped.
+        exit_code: 0 same writes, 1 any differ, 2 could not run, 130/143 stopped by a signal.
         diverged_at: The line naming the first call the recording did not answer, or None.
         lines: What `irimi replay` printed, one string per line.
 
@@ -57,7 +45,7 @@ class ReplayResult:
 
     @property
     def same(self) -> bool:
-        """The replay ran and made the same writes as the recording: exit code 0."""
+        """Return True if the replay made the same writes as the recording."""
         return self.exit_code == exitcodes.OK
 
     def __str__(self) -> str:
@@ -72,10 +60,7 @@ def call_outcome_to_json(outcome: CallResult) -> dict[str, JSONValue]:
 
 
 def read_call_outcome(path: Path) -> CallResult | None:
-    """The outcome the child wrote at `path`, or None when it wrote none that reads: it was
-    killed, or never started, or the file is not one `call_outcome_to_json` writes. Never raises:
-    the agent can write the file too, since its environment names it, and JSON nested deeper than
-    the stack raises RecursionError, which would end `irimi replay` before it ends the run."""
+    """Return the child's outcome at `path`, or None; never raises, since the agent can write it."""
     try:
         d = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, RecursionError):
@@ -105,8 +90,7 @@ def replay_result_to_json(result: ReplayResult) -> dict[str, JSONValue]:
 
 
 def replay_result_from_json(d: Mapping[str, Any]) -> ReplayResult:
-    """Raises ValueError for anything `replay_result_to_json` did not write: a missing or unknown
-    field, or one of the wrong type."""
+    """Return the result `replay_result_to_json` wrote; raise ValueError for anything else."""
     if not isinstance(d, Mapping) or set(d) != set(RESULT_FIELDS):
         raise ValueError(f"a replay result has the fields {', '.join(RESULT_FIELDS)}")
     source, replayed, code = d["source_run_id"], d["replay_run_id"], d["exit_code"]

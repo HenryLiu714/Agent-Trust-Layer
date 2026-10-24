@@ -1,0 +1,360 @@
+"""W7's scenarios: one question each; the script answers from the question alone."""
+
+from __future__ import annotations
+
+import gzip
+import json
+import threading
+from typing import Any, ClassVar
+
+from tests.e2e.workflows.agents import agentkit, credentials
+from tests.e2e.workflows.harness.internet import BOMB_DECODED_BYTES, BOMB_LINE, Req, Resp
+from tests.e2e.workflows.harness.scenario import Scenario, Workflow
+from tests.e2e.workflows.harness.services import (
+    LlmCall,
+    LlmTurn,
+    ScriptedLLM,
+    World,
+    fake_langsmith,
+)
+
+CHANNEL = "C0CHAT"
+# Shaped like a live Stripe key, so the redaction rules would recognise it on disk.
+SECRET = credentials.STREAM_SECRET
+ANSWER = (
+    "Refunds return money to the original payment method. A partial refund leaves the rest "
+    "of the charge in place, and a charge can be refunded until nothing is left."
+)
+# `secret_split_across_writes`: an answer of some 16 KB, the secret whole in the middle of it.
+_RULES = " ".join(f"Rule {i}: a refund goes back to the card it came from." for i in range(300))
+LONG_ANSWER = f"{_RULES[:8000]} The test key is {SECRET}. {_RULES[8000:]}"
+# How many characters of text each `text_delta` of that answer carries.
+LONG_DELTA = 256
+# How many bytes of a gzip stream `GzipLLM` writes at a time: several writes for one short stream.
+GZIP_CHUNK = 64
+# How many bytes of a gzip stream `BombingLLM` writes at a time.
+BOMB_CHUNK = 64 * 1024
+
+
+def chat_script(call: LlmCall) -> LlmTurn:
+    question = call.last_user_text()
+    if call.provider == "anthropic":
+        if "key" in question:
+            return LlmTurn(text=f"The test key is {SECRET}. Keep it out of logs.")
+        return LlmTurn(text=ANSWER)
+    # OpenAI: the model that decides whether to post. It sees the Anthropic answer.
+    if "summary" in question.lower():
+        return LlmTurn(tool_calls=(("post_summary", {"channel": CHANNEL, "text": question}),))
+    return LlmTurn(text="No summary needed.")
+
+
+def summarize_script(call: LlmCall) -> LlmTurn:
+    if call.provider == "anthropic":
+        return LlmTurn(text="Summary: refunds go back to the card within 5-10 days.")
+    return chat_script(call)
+
+
+def long_script(call: LlmCall) -> LlmTurn:
+    if call.provider == "anthropic":
+        return LlmTurn(text=LONG_ANSWER)
+    return chat_script(call)
+
+
+def pair_answer(caller: str) -> str:
+    return f"For caller {caller}: {ANSWER}"
+
+
+def pair_decision(caller: str) -> str:
+    return f"No summary needed for caller {caller}."
+
+
+def pair_script(call: LlmCall) -> LlmTurn:
+    """Answer naming the caller, so a stream recorded against the other caller would show."""
+    caller = "1" if "caller 1" in call.last_user_text() else "2"
+    if call.provider == "anthropic":
+        return LlmTurn(text=pair_answer(caller))
+    return LlmTurn(text=pair_decision(caller))
+
+
+def _sse(doc: dict[str, Any]) -> bytes:
+    return f"data: {json.dumps(doc)}\n\n".encode()
+
+
+class SplittingLLM(ScriptedLLM):
+    """Streams an OpenAI tool call as OpenAI does: id and name, then the arguments in pieces."""
+
+    def _openai(self, body: dict[str, Any]) -> Resp:
+        resp = super()._openai(body)
+        if resp.chunks is None:
+            return resp
+        out = []
+        for chunk in resp.chunks:
+            text = chunk.decode()
+            doc = json.loads(text[6:]) if text.startswith("data: {") else {}
+            calls = doc.get("choices", [{}])[0].get("delta", {}).get("tool_calls")
+            if not calls:
+                out.append(chunk)
+                continue
+            call = calls[0]
+            head = {**call, "function": {"name": call["function"]["name"], "arguments": ""}}
+            out.append(_sse({"choices": [{"index": 0, "delta": {"tool_calls": [head]}}]}))
+            args = call["function"]["arguments"]
+            for i in range(0, len(args), 5):
+                piece = {"index": call["index"], "function": {"arguments": args[i : i + 5]}}
+                out.append(_sse({"choices": [{"index": 0, "delta": {"tool_calls": [piece]}}]}))
+        resp.chunks = out
+        return resp
+
+
+def _event(name: str, doc: dict[str, Any]) -> bytes:
+    return f"event: {name}\ndata: {json.dumps(doc)}\n\n".encode()
+
+
+def _mid_data_line(event: bytes) -> int:
+    """Return an offset inside `event`'s `data:` line: mid-secret if it holds the secret."""
+    if SECRET.encode() in event:
+        return event.index(SECRET.encode()) + len(SECRET) // 2
+    start = event.index(b"\ndata: ") + 1
+    return (start + event.index(b"\n", start)) // 2
+
+
+class MidLineWritesLLM(ScriptedLLM):
+    """Streams Anthropic's text in writes that each end mid-`data:` line, one of them mid-secret.
+
+    Redaction has to read the chunks joined, and recorded chunk lengths follow the redacted line."""
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        if resp.chunks is None:
+            return resp
+        events = [chunk for chunk in resp.chunks if b'"text_delta"' not in chunk]
+        text = "".join(
+            json.loads(chunk.decode().split("\ndata: ", 1)[1])["delta"]["text"]
+            for chunk in resp.chunks
+            if b'"text_delta"' in chunk
+        )
+        at = text.index(SECRET)
+        cuts = [
+            i for i in range(LONG_DELTA, len(text), LONG_DELTA) if not at < i < at + len(SECRET)
+        ]
+        deltas = [
+            _event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": text[a:b]},
+                },
+            )
+            for a, b in zip([0, *cuts], [*cuts, len(text)], strict=True)
+        ]
+        # message_start, content_block_start, the deltas, then the rest in order.
+        events = [*events[:2], *deltas, *events[2:]]
+        writes, carry = [], b""
+        for event in events:
+            cut = _mid_data_line(event)
+            writes.append(carry + event[:cut])
+            carry = event[cut:]
+        resp.chunks = [*writes, carry]
+        return resp
+
+
+class LockstepLLM(ScriptedLLM):
+    """Holds each provider's two calls until both arrive, so the two streams interleave."""
+
+    def __init__(self, script: Any) -> None:
+        super().__init__(script)
+        self._together = {
+            name: threading.Barrier(2, timeout=10) for name in ("anthropic", "openai")
+        }
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        self._together["anthropic"].wait()
+        return super()._anthropic(body)
+
+    def _openai(self, body: dict[str, Any]) -> Resp:
+        self._together["openai"].wait()
+        return super()._openai(body)
+
+
+class BombingLLM(ScriptedLLM):
+    """Streams Anthropic's answer gzip-encoded, with a GiB of `BOMB_LINE` padding before its end.
+
+    The padding lines are SSE fields a parser skips. `heads` holds each stream's decoded start
+    and `sent` the bytes it wrote."""
+
+    def __init__(self, script: Any) -> None:
+        super().__init__(script)
+        self.heads: list[bytes] = []
+        self.sent: list[bytes] = []
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        if resp.chunks is None:
+            return resp
+        ends = [i for i, chunk in enumerate(resp.chunks) if b'"text_delta"' in chunk][-1] + 1
+        head, tail = b"".join(resp.chunks[:ends]), b"".join(resp.chunks[ends:])
+        sent = agentkit.gzip_bomb(head, BOMB_LINE, BOMB_DECODED_BYTES, tail)
+        self.heads.append(head)
+        self.sent.append(sent)
+        resp.chunks = [sent[i : i + BOMB_CHUNK] for i in range(0, len(sent), BOMB_CHUNK)]
+        resp.headers["content-encoding"] = "gzip"
+        resp.chunk_delay = 0.0
+        return resp
+
+
+class GzipLLM(ScriptedLLM):
+    """Streams Anthropic's whole answer gzip-encoded, `GZIP_CHUNK` bytes at a time.
+
+    irimi records it decoded, so a replay must not serve it under the `content-encoding` header."""
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        if resp.chunks is None:
+            return resp
+        sent = gzip.compress(b"".join(resp.chunks), mtime=0)
+        resp.chunks = [sent[i : i + GZIP_CHUNK] for i in range(0, len(sent), GZIP_CHUNK)]
+        resp.headers["content-encoding"] = "gzip"
+        return resp
+
+
+class HeldStreamLLM(ScriptedLLM):
+    """Holds the last chunk of Anthropic's stream until the agent lists the models.
+
+    `hand_off` lists them after its run ends, so the stream is recorded after the run's end."""
+
+    MODELS: ClassVar[dict[str, Any]] = {
+        "data": [{"type": "model", "id": "claude-sonnet-5"}],
+        "has_more": False,
+    }
+
+    def __init__(self, script: Any) -> None:
+        super().__init__(script)
+        self.listed = threading.Event()
+
+    def handle(self, req: Req) -> Resp:
+        if req.host == "api.anthropic.com" and (req.method, req.path) == ("GET", "/v1/models"):
+            self.listed.set()
+            return Resp(200, self.MODELS)
+        return super().handle(req)
+
+    def _anthropic(self, body: dict[str, Any]) -> Resp:
+        resp = super()._anthropic(body)
+        resp.hold = self.listed
+        return resp
+
+
+def _world(world: World) -> None:
+    world.llm.script = chat_script
+
+
+def _held(world: World) -> None:
+    world.llm = HeldStreamLLM(chat_script)
+
+
+def _traced(world: World) -> None:
+    _world(world)
+    world.extra.append(fake_langsmith())
+
+
+def _splitting(world: World) -> None:
+    world.llm = SplittingLLM(summarize_script)
+    world.slack.add_channel(CHANNEL, "payments-team")
+
+
+def _mid_line(world: World) -> None:
+    world.llm = MidLineWritesLLM(long_script)
+
+
+def _lockstep(world: World) -> None:
+    world.llm = LockstepLLM(pair_script)
+
+
+def _gzipped(world: World) -> None:
+    world.llm = GzipLLM(chat_script)
+
+
+def _bombing(world: World) -> None:
+    """Set up `BombingLLM`, building its padding now rather than within the agent's timeout."""
+    agentkit.gzip_bomb(b"", BOMB_LINE, BOMB_DECODED_BYTES)
+    world.llm = BombingLLM(chat_script)
+
+
+QUESTION = "How do refunds work?"
+
+WORKFLOW = Workflow(
+    name="w07_streaming_assistant",
+    summary="A chat endpoint streaming back to its caller: an embeddings call, an Anthropic SSE "
+    "stream, an OpenAI SSE stream whose tool call becomes a Slack post.",
+    scenarios={
+        "normal": Scenario(
+            (QUESTION, "read_all"),
+            env={"LANGSMITH_TRACING": "true"},
+            setup=_traced,
+            doc="two streams, no post, and one LangSmith trace: telemetry",
+        ),
+        "httpx_streams": Scenario(
+            (QUESTION, "read_all"),
+            env={"W7_STREAM_CLIENT": "httpx"},
+            setup=_world,
+            doc="both streams read with httpx, as the model SDKs read them: labelled by the SDK",
+        ),
+        "secret_in_stream": Scenario(
+            ("What is the test key?", "read_all"),
+            setup=_world,
+            doc="a key-shaped secret inside the stream reaches the caller intact",
+        ),
+        "caller_disconnects": Scenario(
+            (QUESTION, "hang_up"),
+            setup=_world,
+            doc="the caller resets after the first event; the run ends in error",
+        ),
+        "upstream_reset": Scenario(
+            (QUESTION, "read_all"),
+            setup=_world,
+            faults=(
+                ("api.anthropic.com", "reset-stream", lambda req: req.path == "/v1/messages", 1),
+            ),
+            doc="Anthropic resets after the first event of its stream",
+        ),
+        "reset_before_stream": Scenario(
+            (QUESTION, "read_all"),
+            setup=_world,
+            faults=(("api.anthropic.com", "reset", lambda req: req.path == "/v1/messages", 1),),
+            doc="Anthropic resets before its stream opens",
+        ),
+        "tool_call_across_deltas": Scenario(
+            ("Please post a summary of refunds", "read_all"),
+            setup=_splitting,
+            doc="a tool call streamed in pieces becomes a Slack post",
+        ),
+        "secret_split_across_writes": Scenario(
+            ("What is the test key?", "read_all"),
+            setup=_mid_line,
+            doc="a 16 KB stream written in pieces that end mid-line, one of them mid-secret",
+        ),
+        "gzip_bomb_stream": Scenario(
+            ("What is the test key?", "read_all"),
+            setup=_bombing,
+            doc="Anthropic's stream comes gzip-encoded, a GiB of padding before its end: the agent "
+            "decodes its start and gives up, irimi records the start of it",
+        ),
+        "gzip_stream": Scenario(
+            (QUESTION, "read_all"),
+            setup=_gzipped,
+            doc="Anthropic's stream comes gzip-encoded and whole: the agent decodes it, irimi "
+            "records it decoded, and a replay serves it decoded, without the encoding",
+        ),
+        "two_callers": Scenario(
+            (QUESTION, "two_callers"),
+            setup=_lockstep,
+            doc="two callers at once: two chats' streams through the proxy side by side",
+        ),
+        "hand_off": Scenario(
+            (QUESTION, "hand_off"),
+            setup=_held,
+            doc="the trigger returns Anthropic's stream still open, as a handler returns a "
+            "streaming response: the run ends first, and the stream is recorded after it",
+        ),
+    },
+)

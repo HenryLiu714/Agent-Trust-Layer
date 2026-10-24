@@ -1,11 +1,12 @@
-"""How the SDK reaches irimi: one POST to the control endpoint per run start, run end and tool
-call, and in a replay one per read tool call, asking for its recorded result.
+"""Post run starts, run ends and tool calls to irimi's control endpoint, and look up replays.
 
-`ControlClient` posts to `{IRIMI_CONTROL}/runs/{run_id}/{action}` with stdlib urllib, never
-through a proxy, and waits `TIMEOUT_S` at most. It never raises: a failed post costs irimi its
-record of the run, never the agent its call, and is warned once per process per kind of failure.
-A lookup that fails is a miss, so the tool runs for real. A timeout or an unreachable endpoint
-pauses every send for `PAUSE_S`, and a proxy speaking another protocol major answers `426`.
+`ControlClient` posts to `{IRIMI_CONTROL}/runs/{run_id}/{action}` with stdlib urllib, bypassing
+any proxy, and waits at most `TIMEOUT_S`.
+
+- Never raises (the SDK never raises); each kind of failure is warned of once per process.
+- A failed lookup is a miss, so the tool runs for real.
+- A timeout or unreachable endpoint pauses every send for `PAUSE_S`.
+- A proxy speaking another protocol major answers `426`.
 """
 
 import json
@@ -41,21 +42,18 @@ LOGGER_NAME = "irimi.sdk"
 logger = logging.getLogger(LOGGER_NAME)
 
 TIMEOUT_S = 2.0
-# How long a timeout or an unreachable endpoint stops every post and lookup.
 PAUSE_S = 30.0
-# The most of a refusal's body a warning quotes. The endpoint's own are shorter.
+# How much of a refusal's body a warning quotes.
 MAX_DETAIL = 200
 
-# The kinds of failure a warning is logged once for. `paused` is a send the breaker skipped, which
-# is never warned of: the failure that opened the breaker was.
+# `paused` is a send the breaker skipped; it is never warned of, as the failure that opened the
+# breaker was.
 Failure = Literal["unset", "rejected", "timeout", "unreachable", "failed", "mismatch", "paused"]
-# The failures that open the breaker: irimi did not answer in time, or nothing answered at all.
 PAUSING: frozenset[Failure] = frozenset({"timeout", "unreachable"})
 
 
 class Reporter(Protocol):
-    """Where a run's start, its end and its tool calls are sent, and, in a replay, where a read
-    tool's recorded result is asked for. `ControlClient` is the one the SDK uses."""
+    """Receive run starts, run ends and tool calls, and answer replay lookups."""
 
     def post(self, run_id: str, action: RunAction, doc: Mapping[str, Any]) -> None: ...
 
@@ -64,8 +62,7 @@ class Reporter(Protocol):
 
 @dataclass(frozen=True)
 class _Failed:
-    """A request that got no 2xx: the kind of failure, what to say of it, and the status of an
-    answer outside 2xx."""
+    """Describe a request that got no 2xx; `status` is set when there was an answer."""
 
     kind: Failure
     detail: str
@@ -73,24 +70,22 @@ class _Failed:
 
 
 class ControlClient:
-    """Posts to the control endpoint named by `IRIMI_CONTROL`, read at each post."""
+    """Post to the control endpoint named by `IRIMI_CONTROL`, read at each post."""
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
-        # A 3xx comes from something else on that port, never irimi's endpoint: it is refused
-        # like any answer outside 2xx, rather than followed outside the proxy.
+        # A 3xx comes from something else on that port, never irimi, so it is refused.
         self._opener = no_redirect_opener()
-        # By what failed and how: a lookup that fails never silences a post's warning.
+        # Keyed by route too, so a failed lookup never silences a post's warning.
         self._warned: set[tuple[str, Failure]] = set()
         self._lock = threading.Lock()
         self._clock = clock
-        # The clock reading before which the breaker skips every send.
         self._paused_until = float("-inf")
 
     def post(self, run_id: str, action: RunAction, doc: Mapping[str, Any]) -> None:
-        """Send `doc`; on any failure, warn (once per kind) and return. Never raises."""
+        """Send `doc`; on failure, warn once per kind. Never raises (the SDK never raises)."""
         try:
             sent = self._send(f"{run_id}/{action}", doc)
-        except Exception as exc:  # a fault of the SDK's own, which the agent must not pay for
+        except Exception as exc:  # the SDK never raises
             sent = _Failed("failed", f"{type(exc).__name__}: {exc}")
         if isinstance(sent, _Failed) and sent.kind != "paused":
             what = "a tool call" if action == TOOL_CALLS_ACTION else f"the {action}"
@@ -102,11 +97,11 @@ class ControlClient:
             )
 
     def recorded(self, run_id: str, name: str, args: JSONValue) -> RecordedOutcome | None:
-        """The recorded outcome of the read tool `name` called with `args`, from a replay's
-        recording: the endpoint's answer to `runs/{run_id}/tool-calls/recorded`, read by
-        `recorded_outcome_from_json`, or None for a miss. Its `404` is the endpoint's miss,
-        said by no warning; any other failure, and an answer that does not decode, is warned once
-        per kind and is a miss too. Never raises."""
+        """Return the recorded outcome of read tool `name` called with `args`, or None for a miss.
+
+        A `404` is a silent miss; any other failure or undecodable answer is warned of once per
+        kind and is also a miss. Never raises (the SDK never raises).
+        """
         lookup = dict(zip(RECORDED_LOOKUP_FIELDS, (name, args), strict=True))
         try:
             sent = self._send(f"{run_id}/{RECORDED_ACTION}", lookup)
@@ -118,7 +113,7 @@ class ControlClient:
                 if isinstance(answer, dict):
                     return recorded_outcome_from_json(answer)
                 sent = _Failed("rejected", "the answer is not a recorded call")
-        except Exception as exc:  # TraceFormatError included: an answer this cannot read
+        except Exception as exc:  # TraceFormatError included
             sent = _Failed("failed", f"{type(exc).__name__}: {exc}")
         self._warn_once(
             "lookup",
@@ -129,8 +124,7 @@ class ControlClient:
         return None
 
     def _send(self, route: str, doc: Mapping[str, Any]) -> bytes | _Failed:
-        """POST `doc` to `{IRIMI_CONTROL}/runs/{route}`: the answer's body, or why there is none.
-        A timeout or an unreachable endpoint pauses every send for PAUSE_S."""
+        """POST `doc` to `{IRIMI_CONTROL}/runs/{route}`; return the body or the failure."""
         if self._clock() < self._paused_until:
             return _Failed("paused", "the circuit breaker is open")
         sent = self._post(route, doc)
@@ -140,8 +134,7 @@ class ControlClient:
         return sent
 
     def _post(self, route: str, doc: Mapping[str, Any]) -> bytes | _Failed:
-        # irimi sets the variable with no trailing slash, but a deployment that sets it by
-        # hand may type one, which would make every route `//runs/...`, a 404.
+        # A hand-set value may end in a slash, which would make every route `//runs/...`, a 404.
         base = os.environ.get(CONTROL_ENV, "").rstrip("/")
         if not base:
             return _Failed("unset", f"{CONTROL_ENV} is not set")
@@ -152,10 +145,10 @@ class ControlClient:
             headers={"Content-Type": "application/json", PROTOCOL_HEADER: PROTOCOL_VERSION},
         )
         try:
-            # To irimi's own listener, which `instrument()` labels: the route names the run.
+            # The route names the run, so `instrument()` must not add `Irimi-Run`.
             with unlabelled(), self._opener.open(request, timeout=TIMEOUT_S) as response:
                 body: bytes = response.read(MAX_ANSWER + 1)
-        except urllib.error.HTTPError as exc:  # an answer outside 2xx, a redirect included
+        except urllib.error.HTTPError as exc:  # any non-2xx answer, redirects included
             with exc:
                 said = exc.read(MAX_DETAIL).decode("utf-8", "replace")
             if exc.code == 426:
@@ -175,7 +168,7 @@ class ControlClient:
         return body
 
     def _warn_once(self, route: str, failed: _Failed, what: str, consequence: str) -> None:
-        # One mismatch warning whatever the route: the versions are the same for every post.
+        # The protocol versions are the same for every route, so a mismatch is warned of once.
         key = ("any" if failed.kind == "mismatch" else route, failed.kind)
         with self._lock:
             if key in self._warned:

@@ -1,5 +1,4 @@
-"""`irimi compare` over two stored writes that print one summary line and differ in what they
-sent: the field diff under the pair names each differing member so that no two print alike."""
+"""`irimi compare` names apart the fields of two writes that print one summary line."""
 
 import dataclasses
 import json
@@ -89,8 +88,9 @@ def _posts(run_id: str, *texts: str) -> StoredRun:
 
 
 def test_a_post_only_one_run_made_never_prints_like_one_both_made():
-    """B posts a typed `\\n` and then the newline A posted: the newline lines up `=`, and the typed
-    one, `+`, is escaped so that it does not read as the same post made twice."""
+    """A post only B made is escaped when it prints like one both made, so it never reads twice.
+
+    B posts a typed `\\n` and then A's newline: the newline lines up `=`, the typed one `+`."""
     a = _posts("a", "a\nb")
     b = _posts("b", "a\\nb", "a\nb")
     rows = compare.compare_runs(a, b, maps_for_stored_runs()).lines()

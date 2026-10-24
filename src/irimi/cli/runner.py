@@ -1,9 +1,4 @@
-"""Process-level plumbing for the commands that run a proxy: the child's environment, the engine
-thread, signal handling, waiting for the child and asking a Python for its irimi.
-
-No mitmproxy here. The engine is driven through the Engine protocol only. What a run *prints* is
-`irimi.report`.
-"""
+"""Process plumbing for proxy commands: child env, engine thread, signals and Python probes."""
 
 import asyncio
 import contextlib
@@ -32,25 +27,20 @@ from irimi.protocol.env import (
 from irimi.protocol.trace import ErrorInfo
 from irimi.record.store import RunStore
 
-# Hosts the child reaches directly, bypassing the proxy.
 NO_PROXY_VALUE = "localhost,127.0.0.1"
 
 READY_TIMEOUT_S = 30.0
 STOP_TIMEOUT_S = 30.0
 CHILD_GRACE_S = 10.0
 _CALL_ENVS = (REPLAY_CALL_ENV, REPLAY_ARGS_FILE_ENV, REPLAY_OUTCOME_FILE_ENV)
-# The signals that stop a serve: Ctrl-C, and what a container runtime or supervisor sends.
 SERVE_STOP_SIGNALS = ("SIGINT", "SIGTERM")
-# What `probe_python` runs under the Python it asks: it imports irimi's replay child, which calls
-# the trigger and writes how the call ended, and prints that irimi's version. It imports irimi
-# alone: the agent's code runs only in the child, under the replay's engine.
+# Imports only irimi, never the agent's code: that runs only in the child, under the engine.
 PYTHON_PROBE = "import irimi.replay.child, irimi; print(irimi.__version__)"
 PYTHON_PROBE_TIMEOUT_S = 30.0
 
 
 class ChildCall(NamedTuple):
-    """The trigger a replay's child calls: its `module:qualname`, the file holding its
-    captured args, and the file the child writes how the call ended to."""
+    """The trigger a replay's child calls, its args file, and the file it writes its outcome to."""
 
     entrypoint: str
     args_file: Path
@@ -67,7 +57,7 @@ def child_env(
     replaying: bool = False,
     call: ChildCall | None = None,
 ) -> dict[str, str]:
-    """`base` plus the variables that route the child through irimi. `base` is never mutated.
+    """Return a copy of `base` plus the variables that route the child through irimi.
 
     Proxy:
         HTTP(S)_PROXY, http(s)_proxy  the listener (`protocol.env.PROXY_ENVS`)
@@ -84,18 +74,8 @@ def child_env(
         IRIMI_REPLAY_ARGS_FILE,       its args file and the file the child writes its outcome
         IRIMI_REPLAY_OUTCOME_FILE     to; removed otherwise
 
-    The `IRIMI_*` names are declared in `protocol.env`, where the SDK can import them.
-    `IRIMI_AGENT_VERSION` is read from the environment the child inherits, not set here.
-
-    `replaying` says the engine answers from a stored run: the child is told so in
-    `IRIMI_REPLAY_RUN`, naming `run_id`. Otherwise any `IRIMI_REPLAY_RUN` in `base` is dropped, so a
-    shell that exported one cannot make a shadow run's SDK ask for recorded results.
-
-    `call` is the trigger a replay's child calls, for `irimi.replay.child`; without it
-    its three variables are dropped, as `IRIMI_REPLAY_RUN` is.
-
-    `ca_cert` must be the CA certificate (`~/.irimi/ca/ca.pem`), never the mitmproxy bundle,
-    which also contains the private key. An IPv6 listen host is bracketed, as a URL spells it.
+    Replay variables in `base` are always dropped. `ca_cert` must be the CA certificate, never the
+    mitmproxy bundle, which also holds the private key.
     """
     proxy = f"http://{netaddr.authority(host, port)}"
     cert = str(ca_cert)
@@ -113,8 +93,7 @@ def child_env(
             "NODE_USE_ENV_PROXY": "1",
             ENGINE_ACTIVE_ENV: "1",
             RUN_ENV: run_id,
-            # The control endpoint on this same listener, with no trailing slash, so the
-            # SDK appends `/runs/<id>/start` and friends.
+            # No trailing slash: the SDK appends `/runs/<id>/...`.
             CONTROL_ENV: proxy + CONTROL_PREFIX.rstrip("/"),
         }
     )
@@ -129,16 +108,14 @@ def child_env(
 
 
 def exit_code_for(returncode: int) -> int:
-    """Shell convention: a child killed by signal N exits 128 + N (Popen reports -N)."""
+    """Return the shell exit code: 128 + N for a child killed by signal N (Popen reports -N)."""
     return 128 - returncode if returncode < 0 else returncode
 
 
 def end_process_run(
     store: RunStore, run_id: str, code: int, ended_at: float, error: ErrorInfo | None = None
 ) -> None:
-    """Close the process run with the child's exit code: `ok` for 0, `error` for anything else,
-    a signal included. `error` is what a replay's child said its call raised, which the
-    run records in place of its exit."""
+    """End the process run: `ok` for exit code 0, else `error` or what a replay's child raised."""
     if code == 0:
         store.end_run(run_id, ended_at, "ok", exit_code=code)
     else:
@@ -160,7 +137,7 @@ class EngineThread:
         return port
 
     def stop(self) -> None:
-        """Idempotent. Returns once the engine thread has finished."""
+        """Stop the engine and wait for its thread. Idempotent."""
         if self.loop.is_closed():  # already stopped; shutdown() would touch the closed loop
             return
         self.engine.shutdown()
@@ -170,17 +147,11 @@ class EngineThread:
 
 
 def start_engine(engine: Engine, timeout: float = READY_TIMEOUT_S) -> EngineThread:
-    """Run `engine` on a background loop and return once its listener is bound.
-
-    Raises EngineStartError, always with a message, if it never binds or does not within
-    `timeout`; the caller must then not spawn a child. The thread and loop are cleaned up before
-    the exception propagates.
-    """
+    """Return `engine` running in a thread once bound; else stop it and raise EngineStartError."""
     loop = asyncio.new_event_loop()
 
     def serve() -> None:
-        # A failed bind reaches the caller through wait_ready(); letting it escape the thread as
-        # well would print a traceback next to the caller's own error message.
+        # A failed bind reaches the caller via wait_ready(); raising here prints a second traceback.
         with contextlib.suppress(EngineStartError):
             loop.run_until_complete(engine.run())
 
@@ -204,22 +175,15 @@ def start_engine(engine: Engine, timeout: float = READY_TIMEOUT_S) -> EngineThre
 
 
 class Child:
-    """The command `irimi shadow` or `irimi replay` runs, as SIGTERM to irimi sees it.
+    """The command `irimi shadow` or `irimi replay` runs, which receives irimi's SIGTERM.
 
-    A supervisor or a container runtime stops `irimi shadow` with SIGTERM, which reaches irimi
-    alone, not its command. Its default action would end irimi at once, with the command still
-    running and its proxy gone, the run never ended and the store never closed. So SIGTERM is
-    passed to the command instead, and the command's exit ends the run as any exit does. One that
-    arrives before the command exists is held, and the command is then never started.
-
-    The handler takes no lock, as serve's does not: `os.kill` and two attribute reads. A command
-    already reaped has its `returncode` and is never signalled, so a recycled pid is never hit."""
+    Passing SIGTERM on lets the run end normally. One held before the command exists stops it from
+    starting; a reaped command is never signalled, so a recycled pid is never hit.
+    """
 
     def __init__(self) -> None:
         self.terminated = False
-        # A Ctrl-C reached irimi while the command ran (`wait_for_child`), which a replay that it
-        # stopped says.
-        self.interrupted = False
+        self.interrupted = False  # Ctrl-C arrived while the command ran
         self._proc: subprocess.Popen[bytes] | None = None
 
     def on_sigterm(self, signum: int, _frame: object) -> None:
@@ -227,8 +191,7 @@ class Child:
         self._pass_on(signum)
 
     def adopt(self, proc: "subprocess.Popen[bytes]") -> None:
-        """`proc` is the command now. A SIGTERM that came while it was being started, when there
-        was no command to pass it to, is passed to it here."""
+        """Take `proc` as the command, passing on any SIGTERM held while it started."""
         self._proc = proc
         if self.terminated:
             self._pass_on(signal.SIGTERM)
@@ -242,10 +205,7 @@ class Child:
 
 @contextlib.contextmanager
 def passing_sigterm_to(child: Child) -> Iterator[Child]:
-    """For the length of the block, SIGTERM is `child.on_sigterm`, on the main thread only, where
-    Python allows a handler; a SIGTERM ignored when irimi started stays ignored, as under serve.
-    The handler found is put back on the way out. SIGINT is untouched: Ctrl-C reaches the whole
-    foreground process group, the command included, and `wait_for_child` handles it."""
+    """Route SIGTERM to `child.on_sigterm` for the block (main thread only; SIG_IGN stays)."""
     if (
         threading.current_thread() is not threading.main_thread()
         or signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
@@ -256,27 +216,17 @@ def passing_sigterm_to(child: Child) -> Iterator[Child]:
     try:
         yield child
     finally:
-        # None: the handler was not installed from Python, which `signal` cannot put back.
+        # None means a handler not installed from Python, which `signal` cannot restore.
         signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
 
 
 @contextlib.contextmanager
 def stopping_on_signals() -> Iterator[list[int]]:
-    """For the length of the block, SIGINT and SIGTERM append their number to the list it yields
-    and do nothing else: no KeyboardInterrupt to unwind through the engine thread's join, and a
-    second signal while the store closes is ignored rather than cutting its last writes short. A
-    container runtime sends SIGTERM and waits, which is what serve exists for.
+    """Record SIGINT and SIGTERM in the yielded list for the block, and do nothing else.
 
-    A handler takes no lock. It runs on the main thread between two bytecodes, which may be
-    inside `Event.wait` holding the event's own lock, so a handler calling `Event.set` there
-    waits on itself forever: the list is the whole of its work, and the main thread polls it.
-    Off the main thread, where Python refuses a handler, nothing is installed.
-
-    A signal ignored when serve started stays ignored: `irimi serve &` from a script inherits an
-    ignored SIGINT, and a Ctrl-C meant for the script must not stop it. Once a signal has arrived,
-    serve is stopping, so on the way out the signals are ignored rather than given back: a second
-    one during the interpreter's exit would otherwise end it with the default action. With none,
-    the handlers found are put back."""
+    The handler only appends: it can run inside `Event.wait`, where `Event.set` would deadlock. Main
+    thread only. After a signal, both stay ignored on exit so a second cannot cut shutdown short.
+    """
     signalled: list[int] = []
     if threading.current_thread() is not threading.main_thread():
         yield signalled
@@ -291,15 +241,12 @@ def stopping_on_signals() -> Iterator[list[int]]:
         yield signalled
     finally:
         for signum, handler in previous.items():
-            # None: the handler was not installed from Python, which `signal` cannot put back.
             restored = signal.SIG_DFL if handler is None else handler
             signal.signal(signum, signal.SIG_IGN if signalled else restored)
 
 
 def watch_engine(thread: threading.Thread, stop: threading.Event, died: threading.Event) -> None:
-    """Stop serve when the engine's thread ends, and say whether it ended first. An engine that
-    stops on its own ends serve as a failure: a sidecar whose proxy is gone must not look alive
-    to its supervisor."""
+    """Stop serve when the engine thread ends; set `died` if unasked, so the sidecar looks dead."""
     thread.join()
     if not stop.is_set():
         died.set()
@@ -307,12 +254,7 @@ def watch_engine(thread: threading.Thread, stop: threading.Event, died: threadin
 
 
 def wait_for_child(proc: "subprocess.Popen[bytes]", child: Child) -> int:
-    """Wait for the child, surviving Ctrl-C, which `child.interrupted` then says. Returns Popen's
-    returncode (negative if signalled).
-
-    Ctrl-C in a terminal reaches the whole foreground process group, so the child already got its
-    own SIGINT; give it time to exit, then escalate.
-    """
+    """Return the child's returncode; on Ctrl-C set `child.interrupted`, wait, then escalate."""
     try:
         return proc.wait()
     except KeyboardInterrupt:
@@ -332,7 +274,7 @@ def wait_for_child(proc: "subprocess.Popen[bytes]", child: Child) -> int:
     try:
         return proc.wait(timeout=CHILD_GRACE_S)
     except Exception:
-        # SIGKILL did not reap it (uninterruptible I/O). Don't block the CLI forever.
+        # SIGKILL did not reap it (uninterruptible I/O); do not block the CLI forever.
         return -signal.SIGKILL
 
 
@@ -348,9 +290,7 @@ class PythonProbeFailed(Exception):
 
 
 def probe_python(python: str) -> str | None:
-    """The irimi version `python` has, as the last line `PYTHON_PROBE` printed under it, or None
-    when it printed none. Raises PythonProbeFailed when it does not answer within
-    `PYTHON_PROBE_TIMEOUT_S`, cannot be run, or cannot import irimi's replay child."""
+    """Return the irimi version `python` has, or None. Raises PythonProbeFailed if it cannot ask."""
     timeout = PYTHON_PROBE_TIMEOUT_S
     try:
         probe = subprocess.run(

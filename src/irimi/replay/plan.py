@@ -1,21 +1,13 @@
-"""What `irimi replay` runs for a stored run.
+"""Decide what `irimi replay` runs for a stored run. Pure: runs no process and prints nothing.
 
-Pure: nothing here runs a process or prints. `cli.replay_cmd` asks `plan` what to run, runs it
-under the replay's engine, and prints `replay.report`'s lines.
+In order of precedence:
 
-WHAT RUNS, in order of precedence (`plan`):
+1. `-- CMD`: that command, as `irimi shadow -- CMD` would run it.
+2. `--entrypoint`, or the trigger's: a call with `--args` or the trigger's replayable args, in
+   `python -m irimi.replay.child`.
+3. A process run: its recorded argv, run again.
 
-1. `-- CMD` given: that command, as `irimi shadow -- CMD` would run it.
-2. `--entrypoint` given, or the run's trigger has an entrypoint: a call of that function with the
-   args, `--args` or the trigger's, in `python -m irimi.replay.child`, under irimi's own
-   Python or `--python`'s. Args the trigger did not record replayably are refused
-   (`not_replayable`).
-3. A process run (`irimi shadow -- <cmd>`): its recorded argv, run again.
-
-Anything else is refused: there is nothing to run. So is a call `replay_child` could never make:
-an entrypoint in `__main__`, which is `replay_child` itself in the child, and a process run's
-command line given to a function as its parameters; and `--args` with no function to give them
-to.
+Anything else is refused, as is an entrypoint in `__main__` and `--args` with no function.
 """
 
 import os
@@ -27,8 +19,7 @@ from irimi.protocol.trace import MAIN_MODULE, JSONValue, RunRecord, Trigger, hol
 from irimi.record import redact
 from irimi.report.terminal import printable
 
-# What `python -m` runs to call a trigger: the child's own module, by its name. Named, not
-# imported: the engine never imports the SDK, which the child does.
+# Named, not imported: the child imports the SDK, which the engine never does.
 CHILD_MODULE = "irimi.replay.child"
 
 
@@ -42,11 +33,9 @@ class Call:
 
 @dataclass(frozen=True)
 class Plan:
-    """What a replay runs: a `Call`, or a command (`argv`), and the trigger its run records - the
-    replayed run's, with the call's entrypoint and args when they were given in its place, and
-    named after another function `--entrypoint` names. None for a command run for a run that
-    recorded no trigger: its run records the command line, as a process run does. `rerun` is set
-    when `argv` is the process run's own recorded command line."""
+    """What a replay runs: a `Call` or a command (`argv`), and the trigger its run records.
+
+    `rerun` is set when `argv` is the process run's own recorded command line."""
 
     call: Call | None
     argv: tuple[str, ...]
@@ -55,7 +44,7 @@ class Plan:
 
 
 class Refused(Exception):
-    """A replay that cannot run: the one line saying why, without `error: `."""
+    """A replay that cannot run; the message is one line saying why, without `error: `."""
 
 
 def plan(
@@ -64,8 +53,7 @@ def plan(
     call: str | None,
     args: dict[str, JSONValue] | None,
 ) -> Plan:
-    """What replaying `source` runs, given `irimi replay`'s `-- CMD`, `--entrypoint` and `--args`
-    (see the module doc), or Refused."""
+    """Return what replaying `source` runs, or raise Refused; see the module docstring."""
     trigger = source.trigger
     if command:
         return Plan(None, tuple(command), trigger)
@@ -90,9 +78,7 @@ def plan(
             args = trigger.args
         elif holds_description(args):
             raise Refused("--args holds a value's description, not the value")
-        # The run is named after the function it calls, by its `module:qualname`, as
-        # `@sdk.trigger` names one; the recorded entrypoint called again keeps the recorded name,
-        # which `name=` may have given.
+        # Keep the recorded name if its entrypoint runs again: `name=` may have set it.
         if trigger is not None and entrypoint == trigger.entrypoint:
             name = trigger.name
         else:
@@ -111,9 +97,9 @@ def plan(
 
 
 def _started_as_script(run_id: str, entrypoint: str, launched_as: Sequence[str] | None) -> str:
-    """The refusal of a trigger in `__main__`, which in a replay's child is `replay_child` itself,
-    ending with the command that replays it. Only a process run records the command line that
-    names the trigger's module; an SDK run's record does not."""
+    """Return the refusal for a trigger in `__main__`, ending with a command that replays it.
+
+    In the child, `__main__` is the child itself. Only a process run's argv names the module."""
     module = _script_module(launched_as) if launched_as else None
     replay_with = (
         f"irimi replay {run_id} --entrypoint {module or '<module>'}:{entrypoint.partition(':')[2]} "
@@ -132,7 +118,7 @@ def _started_as_script(run_id: str, entrypoint: str, launched_as: Sequence[str] 
 
 
 def _script_module(argv: Sequence[str]) -> str | None:
-    """The module a `python path/name.py` or `python -m name` command line runs, or None."""
+    """Return the module a `python path/name.py` or `python -m name` command line runs, or None."""
     program = os.path.basename(argv[0])
     if program.endswith(".py"):
         return program[: -len(".py")]
@@ -146,11 +132,7 @@ def _script_module(argv: Sequence[str]) -> str | None:
 
 
 def not_replayable(trigger: Trigger | None) -> str | None:
-    """Why a trigger's recorded args cannot be given to its function again, or None when they can:
-    no trigger at all; args capture said were not replayable (a value stored by its description, a
-    call that did not bind, a class `revive` could not find); args the store could not redact,
-    stored as `<redaction-failed>` with `replayable` still true; or args that are not an
-    object of parameters, as `sdk.run(name, inputs=...)` may record."""
+    """Return why a trigger's recorded args cannot be passed to its function again, or None."""
     if trigger is None:
         return "the run has no trigger"
     if trigger.args == redact.REDACTION_FAILED:

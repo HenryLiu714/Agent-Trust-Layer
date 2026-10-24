@@ -1,0 +1,15 @@
+# The sidecar app, with irimi installed for its SDK. The repo root is the build context.
+FROM python:3.12-slim
+COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock README.md /build/
+COPY src /build/src
+# irimi's dependencies at the versions uv.lock pins, the ones CI tests, then irimi itself.
+RUN uv export --project /build --frozen --no-dev --no-emit-project -o /tmp/requirements.txt \
+    && uv pip install --system --no-cache -r /tmp/requirements.txt \
+    && uv pip install --system --no-cache --no-deps /build \
+    && rm -rf /build /tmp/requirements.txt
+WORKDIR /app
+COPY examples/sidecar /app/examples/sidecar
+ENV PYTHONUNBUFFERED=1
+# With `python -m`, so the trigger's entrypoint is importable.
+CMD ["python", "-m", "examples.sidecar.app"]

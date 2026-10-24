@@ -1,6 +1,7 @@
 # Secret scanning: gitleaks' own rules, minus the synthetic credentials the tests and the sample
-# workflows use. Each is built in tests/support/credentials.py or examples/workflows/credentials.py
-# from a prefix and a body; older commits spell some of them out whole. None was issued by a service.
+# workflows use. Each is built in tests/support/credentials.py or
+# tests/e2e/workflows/agents/credentials.py from a prefix and a body; older commits spell some of
+# them out whole. None was issued by a service.
 title = "irimi"
 
 [extend]
@@ -9,7 +10,7 @@ useDefault = true
 [allowlist]
 description = "synthetic credentials in the tests and the sample workflows"
 regexes = [
-  # Stripe keys: the shared stand-ins, the keys tests plant and look for on disk, the shape samples.
+  # Stripe keys: the shared test keys, the keys tests plant and look for on disk, the shape samples.
   '''(?:sk|rk)_(?:live|test)_(?:abc123|abc|one|notreal|hermetic|nope|SECRET|secret|StoreUnitSecret|CutMidCharacter|REPLAYSECRET123|ANOTHERSECRET456|ABCDEF123456|OTHER9876|RedactE2e|NestedThreeDeep|StreamedPlain|AfterAnEscape|Q9|zz9|a1b2|a1|a|k|x|A|a{24}|CANARY[A-Za-z0-9]*)\b''',
   '''whsec_(?:abc123|abc|not_the_real_one|CANARY[A-Za-z0-9]*)\b''',
   '''xox[bp]-(?:123-456-abc|123-abc|12-abc|1|A|B|C|CANARY-slack-0+)\b''',

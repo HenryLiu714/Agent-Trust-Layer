@@ -1,8 +1,1 @@
-{
-  "examples/refund_agent/agent.py": {
-    "caps_run": 1
-  },
-  "examples/workflows/w09_scope_gauntlet/agent.py": {
-    "caps_run": 2
-  }
-}
+{}

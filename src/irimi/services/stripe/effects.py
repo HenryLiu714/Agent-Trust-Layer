@@ -1,32 +1,15 @@
-"""Stripe's L2 effects: what a faked write does to a later live read.
+"""What a faked Stripe write does to later live reads.
 
-The modelled effects, by the write that causes each one:
-
-    refunds.create          a new refund object; on the charge, `amount_refunded` and `refunded`,
-                            and the expanded `refunds` list; on page 1 of the refunds list
+    refunds.create          a refund object (`refunds.retrieve` of its id answers 200, not 404);
+                            the charge's `amount_refunded`, `refunded` and expanded `refunds`, in
+                            `charges.retrieve` and `charges.list`; page 1 of the refunds list
     customers.update        the posted fields, on the customer
     payment_intents.cancel  `status`, `canceled_at`, `cancellation_reason`
 
-Two reads beyond the table's letter, both so that irimi does not contradict itself:
-`charges.list` gets the same charge effect as `charges.retrieve`, because the refund agent finds its
-charge in the list and a list that ignored the refund would disagree with the retrieve; and
-`refunds.retrieve` of a minted id is answered from the write log with the object irimi minted, over
-whatever Stripe said about it - the one read where the seam replaces a STATUS as well as a body,
-because Stripe has never heard of that id and answers `404`.
-
-Two rules run through all of it:
-
-* **Never invent a field the live object does not have.** A field Stripe's own response omits is
-  one the agent can never see in production, and putting one there hands it a body no live read
-  can produce. This is `generic.reflect_over`'s rule, applied to reads.
-* **Say `partial` rather than half-apply.** A page the table does not model, a filter it cannot
-  read, a cursor page whose real contents depend on where the minted refund landed: the document is
-  left exactly as Stripe sent it and the exchange records that the world irimi showed is
-  incomplete. Answering a read outright is the opposite move and needs the opposite justification -
-  see `_refund_retrieve`, where there is no live object to be incomplete about.
-
-Pure functions over plain data: no clock, no minting, no I/O, no module state. A replay
-runs these same functions over a recording.
+Guarantees:
+- No field the live object lacks is added.
+- What cannot be applied whole leaves the body as Stripe sent it and marks the read `partial`.
+- Pure functions over plain data (no clock, I/O or module state), so a replay reuses them.
 """
 
 from collections.abc import Sequence
@@ -40,16 +23,13 @@ from irimi.services.model import SERVICE_OWNED, Applied, Read, Rewritten, Write
 # Stripe's own default page size, and what a list read gets when it names no `limit`.
 DEFAULT_LIST_LIMIT = 10
 MAX_LIST_LIMIT = 100
-# The `GET /v1/refunds` parameters the effects understand. Anything else means irimi cannot say
-# where the minted refund belongs on this page, and the read is `partial`. `expand` arrives as
-# `expand[0]`, so it is matched by prefix.
+# `GET /v1/refunds` parameters understood (else `partial`); `expand[0]` is matched by prefix.
 KNOWN_LIST_PARAMS = frozenset({"limit", "charge", "payment_intent"})
 CURSOR_PARAMS = frozenset({"starting_after", "ending_before"})
 
 
 def apply_read(read: Read, document: Any, writes: Sequence[Write]) -> Applied:
-    """The run's faked Stripe writes, applied to one live read's parsed body."""
-    # `read.posted` is ignored, not forgotten: a Stripe read is a GET and posts nothing.
+    """Apply the run's faked Stripe writes to one live read's parsed body."""
     operation = read.operation
     if not isinstance(document, dict):
         return Applied(document)
@@ -69,13 +49,9 @@ def apply_read(read: Read, document: Any, writes: Sequence[Write]) -> Applied:
 
 
 def rewrite_query(read: Read, writes: Sequence[Write]) -> Rewritten | None:
-    """Translate a cursor naming a refund irimi minted, before the read is forwarded.
+    """Drop a `starting_after` naming a minted refund, which Stripe would refuse, before forwarding.
 
-    Stripe has never heard of that id and answers the page with an error. The minted refund is
-    always the newest, so it sits first on page 1 and "everything after it" is the real list from
-    its top - which Stripe spells as no cursor at all. So the pair is removed rather than
-    substituted, and `Rewritten.removed` names it so the response side knows this page follows
-    the minted refund (see `_refunds_list`).
+    A minted refund is the newest, so the page after it is the real list from its top.
     """
     if read.operation != "refunds.list":
         return None
@@ -88,11 +64,8 @@ def rewrite_query(read: Read, writes: Sequence[Write]) -> Rewritten | None:
     return Rewritten(query=urlencode(kept), removed=f"{dropped[0][0]}={dropped[0][1]}")
 
 
-# ------------------------------------------------------------------------------- the effects
-
-
 def _charge(charge: dict[str, Any], writes: Sequence[Write]) -> Applied:
-    """`amount_refunded`, `refunded`, and the expanded `refunds` list, on one charge object."""
+    """Move `amount_refunded`, `refunded` and the expanded `refunds` list on one charge."""
     mine = [r for r in _minted_refunds(writes) if r.answer.get("charge") == charge.get("id")]
     if not mine or "amount_refunded" not in charge:
         return Applied(charge)
@@ -103,9 +76,7 @@ def _charge(charge: dict[str, Any], writes: Sequence[Write]) -> Applied:
     if "refunded" in charge:
         charge["refunded"] = refunded == charge.get("amount")
     refunds = charge.get("refunds")
-    # Stripe sends `refunds` only when the request expanded it, so its presence IS the question
-    # "did this caller ask for the list?" - asked of the body rather than of `expand[0]`, which
-    # is the same answer with no query parsing.
+    # Stripe sends `refunds` only when the request expanded it.
     if isinstance(refunds, dict) and isinstance(refunds.get("data"), list):
         refunds["data"] = [r.answer for r in reversed(mine)] + refunds["data"]
         if isinstance(refunds.get("total_count"), int):
@@ -114,8 +85,7 @@ def _charge(charge: dict[str, Any], writes: Sequence[Write]) -> Applied:
 
 
 def _charges_list(document: dict[str, Any], writes: Sequence[Write]) -> Applied:
-    """The same charge effect, wherever the charge appears. `examples/refund_agent/agent.py`
-    picks its charge out of this list by reading `refunded` and `amount_refunded`."""
+    """Apply the charge effect to every charge in the list, so it agrees with a retrieve."""
     data = document.get("data")
     if not isinstance(data, list):
         return Applied(document)
@@ -127,27 +97,21 @@ def _charges_list(document: dict[str, Any], writes: Sequence[Write]) -> Applied:
 
 
 def _refunds_list(read: Read, document: dict[str, Any], writes: Sequence[Write]) -> Applied:
-    """Page 1 of `GET /v1/refunds`: the minted refund first, the page kept to its own limit."""
+    """Put minted refunds first on page 1 of `GET /v1/refunds`, keeping the page to its limit."""
     minted = _minted_refunds(writes)
     if not minted:
         return Applied(document)
     params = parse_qsl(read.request.query, keep_blank_values=True)
     if any(k in CURSOR_PARAMS for k, _ in params):
-        # Some page other than the first, and which real items it holds depends on where the
-        # minted refund landed. The effects model page 1 only.
+        # A later page's real items depend on where the minted refund landed.
         return Applied(document, partial=True)
     removed = read.translated_from or ""
     if removed.startswith("starting_after="):
-        # `rewrite_query` removed a cursor naming a refund irimi minted, so this IS the page that
-        # follows it: the minted refund belongs on the page before this one, and prepending it
-        # here would hand the agent its own refund twice. Fully modeled, nothing to change -
-        # unless an OLDER minted refund also belongs after the cursor, which the real list from
-        # its top leaves out. That page is not modeled, and saying `full` would hide it.
+        # This page follows a minted refund, which is on the page before. Only an older minted
+        # refund, which the real list leaves out, would belong here: then the page is `partial`.
         ids = [r.answer["id"] for r in minted]
         after = removed.partition("=")[2]
         older = minted[: ids.index(after)] if after in ids else []
-        # `is not False` because a refund whose filter cannot be answered MIGHT belong on this
-        # page, and "might be missing" is exactly what `partial` says.
         if any(_passes_filters(r.answer, params) is not False for r in older):
             return Applied(document, partial=True)
         return Applied(document)
@@ -155,8 +119,6 @@ def _refunds_list(read: Read, document: dict[str, Any], writes: Sequence[Write])
         return Applied(document, partial=True)
     verdicts = [(r, _passes_filters(r.answer, params)) for r in minted]
     if any(passes is None for _, passes in verdicts):
-        # One of the run's refunds may or may not belong on this page and irimi cannot tell, so
-        # the page it shows may be missing a refund the agent itself created. Say so.
         return Applied(document, partial=True)
     mine = [r for r, passes in verdicts if passes]
     if not mine:
@@ -176,27 +138,7 @@ def _refunds_list(read: Read, document: dict[str, Any], writes: Sequence[Write])
 def _refund_retrieve(
     request: Request, document: dict[str, Any], writes: Sequence[Write]
 ) -> Applied:
-    """A refund irimi minted, answered from the write log rather than left as Stripe's 404.
-
-    Stripe has never heard of that id and answers `404` with `resource_missing`, so this is the one
-    read where the honest answer needs a STATUS as well as a body - `Applied.status` is how the
-    effects say so. The object handed back is the very one
-    irimi answered the write with, which is what the agent was told exists: nothing is invented,
-    and none of the live body survives because there is no live object behind it.
-
-    Whatever Stripe said ABOUT THE OBJECT, not only a 404: a 24-character random id colliding with a
-    real refund is not a scenario, and the object the agent asked for is the one irimi minted. But
-    not over an error about anything else. A 401, a 429 or a 5xx on the same read is Stripe's answer
-    about the credentials or itself, which production would have sent for the real refund too, and
-    answering 200 over it is the error-into-success untruth this module's header forbids. So an
-    `error` body whose code is not `resource_missing` is left as sent and flagged `partial`.
-
-    A shallow copy, never the write log's own dict - the overlay serializes what it is handed and a
-    later effect must not find this one mutated. `slack._posts` copies for the same reason.
-
-    A read of a refund irimi did NOT mint is untouched, 404 and all: that one is Stripe's own
-    answer about Stripe's own state, and the agent should see it.
-    """
+    """Answer a minted refund from the write log, as a copy at 200; other errors stay, `partial`."""
     ident = request.path.rsplit("/", 1)[-1]
     mine = next((r for r in _minted_refunds(writes) if r.answer["id"] == ident), None)
     if mine is None:
@@ -210,22 +152,19 @@ def _refund_retrieve(
 
 
 def _customer(customer: dict[str, Any], writes: Sequence[Write]) -> Applied:
-    """The posted fields of every `customers.update` for this customer."""
+    """Apply the posted fields of every `customers.update` for this customer."""
     changed = False
     for write in writes:
         if write.operation != "customers.update" or write.answer.get("id") != customer.get("id"):
             continue
         for name, posted in write.posted.items():
-            # `name not in customer` is `generic.reflect_over`'s rule: a field the live object
-            # does not have is one the real service would not have returned. It also keeps
-            # `expand[0]` and friends out, without a second list of parameter names to maintain.
+            # A field the live object lacks is never added; this also skips `expand[0]`.
             if name in SERVICE_OWNED or name not in customer:
                 continue
             value = posted
             if name == "metadata" and isinstance(posted, dict) and isinstance(customer[name], dict):
                 value = {**customer[name], **posted}  # Stripe merges metadata
-            # `changed` only when a field really moved: an update whose every field was skipped
-            # leaves the live body as Stripe sent it, and must not be stamped `overlay`.
+            # An update that moves no field must not mark the live body `overlay`.
             if customer[name] != value:
                 customer[name] = value
                 changed = True
@@ -233,7 +172,7 @@ def _customer(customer: dict[str, Any], writes: Sequence[Write]) -> Applied:
 
 
 def _payment_intent(intent: dict[str, Any], writes: Sequence[Write]) -> Applied:
-    """`status`, `canceled_at` and `cancellation_reason` for a cancelled payment intent."""
+    """Set `status`, `canceled_at` and `cancellation_reason` on a cancelled payment intent."""
     changed = False
     for write in writes:
         if write.operation != "payment_intents.cancel" or write.answer.get("id") != intent.get(
@@ -250,9 +189,6 @@ def _payment_intent(intent: dict[str, Any], writes: Sequence[Write]) -> Applied:
     return Applied(intent, changed=changed)
 
 
-# ------------------------------------------------------------------------------------ helpers
-
-
 def _minted_refunds(writes: Sequence[Write]) -> list[Write]:
     return [
         w for w in writes if w.operation == "refunds.create" and isinstance(w.answer.get("id"), str)
@@ -260,7 +196,7 @@ def _minted_refunds(writes: Sequence[Write]) -> list[Write]:
 
 
 def minor_units(value: Any) -> int:
-    """`value` as a whole number of minor units, or 0. `bool` is an `int` and is not one here."""
+    """Return `value` as a whole number of minor units, or 0 (a `bool` counts as 0)."""
     return value if is_int(value) else 0
 
 
@@ -269,15 +205,7 @@ def _known_list_param(name: str) -> bool:
 
 
 def _passes_filters(refund: dict[str, Any], params: Sequence[tuple[str, str]]) -> bool | None:
-    """Whether a minted refund belongs on a filtered page: True, False, or None for "cannot tell".
-
-    None is the case the fixture forces. A refund posted with only `charge` is answered from
-    a fixture whose `payment_intent` is `null`, so a read filtered by `payment_intent=pi_X` cannot
-    be told from the minted object whether the refund matches - in production Stripe would have
-    filled that field in. Treating unknown as "does not match" would drop the agent's own refund
-    off a page that then claims to be complete, which is the untruth this module's header forbids.
-    The caller turns None into `partial` instead.
-    """
+    """Return whether a minted refund passes the page's filters; None where its field is `null`."""
     for name, value in params:
         if name not in ("charge", "payment_intent"):
             continue

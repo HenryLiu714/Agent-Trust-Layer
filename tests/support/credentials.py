@@ -1,9 +1,6 @@
 """Every synthetic credential the tests use, and none of them real.
 
-Each is a prefix joined to a body, so no file holds a whole key for a secret scanner to flag;
-`.gitleaks.toml` allowlists the joined values. A test that needs a key of one shape only, to check
-where redaction or a cut starts and stops, joins a prefix below to a body of its own.
-`examples/workflows/credentials.py` is the sample workflows' copy.
+Each joins a prefix to a body, so no file holds a whole key; `.gitleaks.toml` allowlists them.
 """
 
 # The prefix each kind of key starts with. `irimi.core.secret_shapes` recognises every one.

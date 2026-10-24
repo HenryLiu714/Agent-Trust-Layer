@@ -1,6 +1,4 @@
-"""The summary of a run that checked two writes at once: each write says why its own check could
-not be made, and only the one whose check read was refused for its credentials leaves its
-webhooks out."""
+"""Two writes checked at once each say why their own check failed; a 401's webhooks are left out."""
 
 import pytest
 
@@ -48,8 +46,7 @@ def _check(charge: str, status: int, started_at: float) -> Exchange:
 
 @pytest.mark.parametrize("a_checked_first", [True, False])
 def test_two_writes_checked_at_once_each_take_their_own_check_read(a_checked_first):
-    """Refunds of `ch_A1` and `ch_B2` decided at once, each span holding both check reads, in
-    either order: `ch_A1`'s read failed 429, `ch_B2`'s was refused 401."""
+    """Writes decided at once each take their own check read, in either order (429, then 401)."""
     a_at, b_at = (1.1, 1.2) if a_checked_first else (1.2, 1.1)
     events = sorted(
         [_check("ch_A1", 429, a_at), _check("ch_B2", 401, b_at)], key=lambda e: e.started_at

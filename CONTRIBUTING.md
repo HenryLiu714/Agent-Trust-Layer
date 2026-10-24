@@ -1,5 +1,23 @@
 # Contributing to irimi
 
+Thank you for helping. This page covers how to propose a change, how to set up and test, and the
+conventions the code follows.
+
+## How to contribute
+
+- **Bugs.** Open an issue with the bug template, or send a pull request with the fix and a test
+  that fails without it. A write that reached the real service has its own template. Report a
+  security problem privately, as [`SECURITY.md`](SECURITY.md) says.
+- **Features and new services.** Open an issue first, so we can agree on the shape before you
+  write the code.
+- **Pull requests.** Fork the repository, make your change on a branch, and open a pull request
+  against `main`. Name the branch `<issue-number>-<short-slug>` when there is an issue, and put
+  `Closes #<n>` in the pull request. CI must pass before review: lint, format check, mypy and the
+  tests, on Ubuntu and macOS.
+- **License.** Contributions are licensed under Apache-2.0, the project's license
+  ([`LICENSE`](LICENSE)).
+- **Conduct.** Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md).
+
 ## Prerequisites
 
 - macOS or Linux.
@@ -11,36 +29,15 @@
 ## Set up
 
 ```
-git clone https://github.com/HenryLiu714/Irimi.git
+git clone https://github.com/<you>/Irimi.git
 cd Irimi
 scripts/setup.sh          # or: make setup
 ```
 
 That creates `.venv`, installs irimi in editable mode with the dev tools, and runs `irimi init`
 to generate the local CA under `~/.irimi/ca/`. Set `IRIMI_HOME` first if you want it elsewhere
-(see `.env.example`). Then:
-
-```
-uv run irimi --help
-```
-
-## Releasing
-
-A `v<version>` tag publishes irimi to PyPI through `.github/workflows/release.yml`, with PyPI
-Trusted Publishing, so there is no token to keep (#169). Bump `version` in `pyproject.toml` and
-irimi's own entry in `uv.lock`, and add a `## [<version>]` section to `CHANGELOG.md`, in a PR;
-once it is merged, tag that commit on `main` and push the tag:
-
-```
-git tag v0.1.0 && git push origin v0.1.0
-```
-
-The workflow runs the whole CI suite, builds the wheel and sdist, and installs the wheel into a
-clean Python 3.12 venv to run `irimi --version` and `irimi init`. It refuses a tag that does not
-match `pyproject.toml`, a tag on a commit that is not on `main`, and a version with no
-`CHANGELOG.md` section. Only then does it publish, with attestations, and create a GitHub Release
-with that section as its notes. A version, once on PyPI, can never be uploaded again, even after it
-is deleted.
+(see `.env.example`). Then `make demo` runs an agent under `irimi shadow` against fake services,
+with no keys and no network.
 
 ## Day to day
 
@@ -59,152 +56,108 @@ make typecheck    # uv run mypy
 `uvx pre-commit install` runs ruff and the prose lint on every commit, with the versions `uv.lock`
 pins. Each test has a 120-second limit (`pytest-timeout`), so a hang fails its test.
 
-The suite runs in about five minutes and needs no network and no keys: the engine tests start a
-real mitmproxy on a random loopback port against local HTTP servers. `tests/conftest.py` points
-`IRIMI_HOME` and the working directory at empty temporary directories, so your own overrides file
-and CA are never in play.
+The suite (about 7,000 tests) needs no network and no keys. On the maintainer's laptop it takes
+about six and a half minutes serially (`uv run pytest -q`) and about two and a half with
+`make test`, which runs it in parallel. The engine tests start a real mitmproxy on a random
+loopback port against local HTTP servers. `tests/conftest.py` points `IRIMI_HOME` and the working
+directory at empty temporary directories, so your own overrides file and CA are never in play.
 
-The example agent needs the Stripe SDK (and optionally Slack's). They are an opt-in group:
+The examples ([`examples/README.md`](examples/README.md)) need the official Stripe and Anthropic
+SDKs, an opt-in group (`uv sync --group examples`). `make demo EXAMPLE=quickstart` runs one under
+`irimi shadow` against fake services, with no keys. Each example is driven end to end on every test
+run: `tests/e2e/test_quickstart.py`, `test_replay_example.py`, `test_sidecar.py` and
+`test_demo.py`.
 
-```
-uv sync --group examples
-export STRIPE_API_KEY=sk_test_...
-uv run python examples/refund_agent/seed.py         # once, outside shadow: seeds a charge
-uv run irimi shadow -- python examples/refund_agent/agent.py
-```
+### Live checks
 
-`tests/test_phase_exit.py` holds a hermetic criterion per phase, and Phase 2's twin through the
-real `irimi shadow`, all of which run on every `uv run pytest -q`; and one live check of that run.
-The live check is marked `live`, which a plain `uv run pytest` deselects even when `STRIPE_API_KEY`
-is exported. Run it with `uv run pytest -m live`; it still skips unless `STRIPE_API_KEY` is set and
-the `examples` group is installed. Run it by hand before closing a phase:
+These are optional, call real services, and need test-mode keys. Run them before a release.
 
-```
-STRIPE_API_KEY=sk_test_... uv run pytest -m live -q -rs tests/test_phase_exit.py
-```
-
-With `SLACK_BOT_TOKEN` and `SLACK_CHANNEL` also set, the agent posts to Slack and reads the channel
-back, and the check asserts the post is in what it read. Give `SLACK_CHANNEL` as a channel **id**
-(`C0123`), not `#general`: that is what makes the read-back `overlay: full`. `chat.postMessage`
-accepts the name but `conversations.history` wants the id, and irimi's faked post echoes back the
-spelling it was sent, so a post to `#general` is read back from a channel irimi cannot match to it
-(#44).
+`tests/live/test_stripe_test_mode.py` runs the quickstart agent against Stripe test mode and
+checks that Stripe holds no refund afterwards. It is marked `live`, which a plain `uv run pytest`
+deselects even when `STRIPE_API_KEY` is exported:
 
 ```
-STRIPE_API_KEY=sk_test_... SLACK_BOT_TOKEN=xoxb-... SLACK_CHANNEL=C0123 \
-  uv run pytest -m live -q -rs tests/test_phase_exit.py
+uv run python -m examples.seed_stripe          # once, outside shadow: seeds a charge
+STRIPE_API_KEY=sk_test_... uv run pytest -m live -q -rs tests/live
 ```
 
-Phase 3's exit for a server agent has a hermetic half, `tests/test_phase3_exit.py`, which runs on
-every `uv run pytest -q`, and a container half, which needs Docker with compose, `uv` and a
-test-mode key, and is run by hand before closing the phase (`examples/server_agent/README.md`).
-It seeds two charges, builds both images, refunds both charges at once through the agent under
-irimi, checks that irimi stored two ok runs and that Stripe holds no refund, and tears down:
+`scripts/live-checks/sidecar.sh` runs the sidecar example and `irimi serve` in two containers. It
+needs Docker with compose, `uv` and a test-mode key. It seeds two charges, refunds both at once
+through the app under irimi, checks that irimi stored two runs and that Stripe holds no refund, and
+tears down:
 
 ```
-STRIPE_API_KEY=sk_test_... examples/server_agent/check.sh
+STRIPE_API_KEY=sk_test_... scripts/live-checks/sidecar.sh
 ```
 
-Phase 3's exit for an LLM agent (use case 1) has a hermetic half too,
-`tests/test_phase3_replay_exit.py`, and a live half run by hand before closing the phase
-(`examples/llm_refund_agent/README.md`): record the agent against Stripe test mode and the real
-Anthropic API, replay it with `prompt_half.txt`, and check that the replay names the model call as
-where it diverged, the refund as the write that changed, and that Stripe holds no refund.
+[`examples/replay/README.md`](examples/replay/README.md) has the replay example's live run, against
+Stripe test mode and the real Anthropic API.
 
 ## Sample workflows
 
-`examples/workflows/` holds eleven small agents, each built to exercise one part of irimi: a
-multi-turn LLM tool loop, a nightly batch job, a concurrent queue worker, Slack and Stripe webhook
-handlers, database writes behind `@sdk.write_tool`, SSE streaming, internal services, failure paths,
-and agents that get around the proxy. A harness runs each scenario bare, under `irimi shadow` and
-under `irimi serve` (#77), against a fake internet that answers for the real host
-names, so irimi's shipped maps decide every call. `tests/workflows/` holds every scenario to
-five universal invariants and pins what irimi does in each one. `examples/workflows/README.md`
-explains the harness.
+`tests/e2e/workflows/` holds eleven small agents, each built to exercise one part of irimi, and a
+harness that runs each scenario bare, under `irimi shadow` and under `irimi serve`, against a fake
+internet that answers for the real host names, so irimi's shipped maps decide every call. Its tests
+hold every scenario to five invariants and pin what irimi does in each one.
+[`tests/e2e/workflows/README.md`](tests/e2e/workflows/README.md) explains the harness, lists the
+workflows, and says how to add one.
 
 ```
-uv run python -m examples.workflows                              # list workflows and scenarios
-uv run python -m examples.workflows w09_scope_gauntlet verbs     # one scenario, bare then shadow
-uv run pytest -q tests/workflows
+uv run python -m tests.e2e.workflows                             # workflows, and where to start
+uv run python -m tests.e2e.workflows w09_scope_gauntlet verbs    # one scenario, every mode
+make workflows                                                   # the whole corpus
 ```
 
-When a change alters what irimi answers, a workflow test pins the old answer and fails. Update the
-pin in the same PR, and say in the PR why the new answer is right.
-
-Every feature is tested on the corpus end to end, as well as in unit tests. Each open issue's
-`Since #89 landed` section names the workflows its feature has to run through and the pins it
-extends or flips. Extend an existing workflow with a scenario before writing a new agent. A pin
-under `LOOKS WRONG:` is a known bug: the PR that fixes it updates the pin and removes the marker.
+Every feature is tested on the corpus end to end, as well as in unit tests. If your change touches
+behaviour a workflow covers, extend that workflow's scenarios and update its pins rather than
+writing a new agent, and say in the pull request why the new answer is right. Ask in the issue if
+you are unsure which workflow covers it. A pin under `KNOWN BUG:` is a known bug: the change that
+fixes it updates the pin and removes the marker.
 
 ## Where things are
 
-`docs/architecture.md` is the map: each module's job, the layer it sits in, how one request moves
-through the engine, and the rules the tests hold the code to. Read it before adding a module.
-The short version:
+[`docs/architecture.md`](docs/architecture.md) is the map of the code: each package's job, the
+layer it sits in, how one request moves through the engine, and the rules the tests hold the code
+to. Read it before adding a module.
 
-```
-src/irimi/
-  core/                               vocabulary: exchanges, addresses, bounds, the body parser
-  protocol/                           the engine-SDK contract and the trace format
-  config/                             where irimi keeps state; private files; the local CA
-  sdk/                                what an agent imports; `__init__` is the public surface
-  servicemaps/                        the service maps as code, and what a request is by them
-  services/                           one spec per service: answers, effects, checks
-  record/                             redaction and the run store
-  decide/                             targets, the check read, the write log, the policy
-  engine/                             the Engine protocol and session core; mitm.py imports mitmproxy
-  report/                             what a run prints
-  replay/                             re-running a stored run, and comparing two runs
-  cli/  __main__.py  testing.py       the command and its composition root; `python -m irimi`
-  maps/*.yaml                         the shipped service maps
-  fixtures/*.json                     the vendored response objects L1 answers start from
-tests/                                one file per module, plus the invariant and exit tests
-examples/refund_agent/                the fixture agent the proxy is tested against
-examples/server_agent/                a server agent beside `irimi serve`, in containers
-examples/llm_refund_agent/            an LLM agent recorded, its prompt edited, and replayed
-examples/workflows/                   the sample workflows and the harness that runs them
-tests/workflows/                      the workflows' invariants and per-workflow pins
-```
-
-Two tests guard the layout itself. `tests/test_import_boundary.py` fails if mitmproxy is imported
-outside `engine/mitm.py`, or if a module imports a higher layer, another package of its own
-layer, or a module after it in its own package; when you add a module it asks you to place it in
-the layer table (and in `docs/architecture.md`, which it checks against the same table).
+`tests/safety/test_import_boundary.py` fails if mitmproxy is imported outside `engine/mitm.py`, or
+if a module imports a higher layer, another package of its own layer, or a module after it in its
+own package. When you add a module, it asks you to place it in its layer table and in
+`docs/architecture.md`, which it checks against the same table. `tests/safety/README.md` lists
+the other rules every run keeps and the test that holds each.
 
 ## Adding a service map
 
-Maps are YAML in `src/irimi/maps/` and need no Python. The README's "Service maps" section is the
-schema; the loader refuses anything outside it by name. Things to know before you write one:
+Maps are YAML in `src/irimi/maps/` and need no Python.
+[`docs/service-maps.md`](docs/service-maps.md) is the schema, and the loader refuses anything
+outside it by name. [`docs/adding-a-service.md`](docs/adding-a-service.md) covers the Python a
+service needs for whole objects, later reads that show a write, and precondition checks. Things to
+know before you write a map:
 
 - Write `match:` in block style. A flow mapping cannot hold a path containing `{`.
 - A write may name a `fixture:`, which is an object in `src/irimi/fixtures/<service>.json`.
-  Add the object there first, with its provenance in the file's `_source` entry; a `fixture:`
-  the package does not ship answers at L0 and flags the exchange rather than failing.
+  Add the object there first, with its provenance in the file's `_source` entry.
 - A write may name a `fires:` list of the webhook event names the real service would have sent.
-  It is free text — the loader checks the key, but there is no table of a service's events to check
-  a name against — so name only events the service really sends for that call, and only on a write
-  the service's effects table in `src/irimi/services/` models, so a later read and the events agree.
-  `tests/test_servicemap.py` pins every shipped list; update it with the map.
+  The loader cannot check the names, so name only events the service really sends for that call,
+  and only on a write the service's effects in `src/irimi/services/` model, so a later read and
+  the events agree. `tests/test_servicemap.py` pins every shipped list; update it with the map.
 - Quote a wildcard host (`"*.posthog.com"`) and any `human:` template containing `#`.
 - A live-forwarded kind (`read`, `llm`, `telemetry`) must name its methods and must justify a
-  destructive one with `live_because:`. A `default_kind:` may never be a live
-  kind. This is THE SCOPE RULE; `servicemaps/rules.py` explains why.
+  destructive one with `live_because:`. A `default_kind:` may never be a live kind. This is the
+  scope rule; `servicemaps/rules.py` enforces it.
 - Shipped maps never set a `target:`. Targets belong in a user's overrides file.
 - `tests/test_servicemap.py` pins the shipped maps' hosts, route counts and a round-trip through a
-  built wheel; `tests/test_pipeline.py` pins how each shipped route classifies. Add to both.
+  built wheel; `tests/test_classify.py` pins how each shipped route classifies. Add to both.
 
 ## Conventions
 
-- Branch per issue, named `<issue-number>-<short-slug>`. Open a PR against `main` with
-  `Closes #<n>` in the body.
 - Commit messages say what changed and why, in the imperative. The issue a change closes belongs
-  in the commit message and the PR, not in the comment that states the rule: `git blame` finds it.
-  The next section says when a comment may cite an issue.
+  in the commit message and the pull request, not in the comment that states the rule: `git blame`
+  finds it. The next section says when a comment may cite an issue.
 - A safety rule is enforced where the configuration is loaded *and* at the decision it protects.
-  One check is a rule-shaped hole.
 - Nothing in a mitmproxy hook may raise. Fail closed: answer locally and flag it.
-- CI runs lint, format check, mypy and the tests on Ubuntu and macOS, on Python 3.14 and on 3.12,
-  the floor `pyproject.toml` promises.
+- A user-visible change gets a line under `[Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md),
+  marked **Breaking** with how to migrate when it breaks something.
 
 ## Writing comments, docstrings and messages
 
@@ -270,3 +223,25 @@ numbers. It holds each file to the counts in `tests/prose_baseline/*.json`, whic
 - A change that removes matches fails the test until you lower the file's counts to match (delete
   an entry that reaches zero). The failure message prints the counts to write.
 - A file that moves or is renamed takes its baseline entry with it, with the same counts.
+
+## For maintainers: releasing
+
+A `v<version>` tag publishes irimi to PyPI through `.github/workflows/release.yml`, with PyPI
+Trusted Publishing, so there is no token to keep. In a pull request:
+
+1. Bump `version` in `pyproject.toml` and irimi's own entry in `uv.lock`.
+2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [<version>] - <YYYY-MM-DD>`, add a new empty
+   `## [Unreleased]` above it, and update the link references at the bottom.
+
+Once it is merged, tag that commit on `main` and push the tag:
+
+```
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The workflow runs the whole CI suite, builds the wheel and sdist, and installs the wheel into a
+clean Python 3.12 venv to run `irimi --version` and `irimi init`. It refuses a tag that does not
+match `pyproject.toml`, a tag on a commit that is not on `main`, and a version with no
+`CHANGELOG.md` section. Only then does it publish, with attestations, and create a GitHub Release
+with that section as its notes. A version, once on PyPI, can never be uploaded again, even after it
+is deleted.

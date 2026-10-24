@@ -1,5 +1,4 @@
-"""The overlay never edits an upstream error about the caller or the service into a success, and
-a run that has ended keeps no write and no idempotency key, whatever it sends after its end."""
+"""The overlay never edits an upstream error into a success; an ended run keeps no write or key."""
 
 import dataclasses
 import json
@@ -92,8 +91,9 @@ def _overlaid(write: Exchange, read: Request, status: int, document: Any) -> tup
 def test_a_minted_refunds_read_keeps_an_error_that_is_not_not_found(
     status: int, document: Any
 ) -> None:
-    """Only a 404 is Stripe saying it never heard of the id irimi minted. A rate limit, a bad key
-    or an outage would have reached the agent for a real refund too: left as sent, `partial`."""
+    """A minted refund's 429, 401 or 5xx is left as sent, `partial`: only a 404 is overlaid.
+
+    A rate limit, a bad key or an outage would have reached the agent for a real refund too."""
     read = _request("GET", "api.stripe.com", f"/v1/refunds/{MINTED}")
     response, fidelity = _overlaid(REFUND, read, status, document)
     assert response.status == status

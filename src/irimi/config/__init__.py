@@ -1,3 +1,1 @@
-"""irimi's own state on this machine: where it lives (`paths`), how its private files are written
-(`files`), and the local CA (`ca`).
-"""
+"""irimi's state on this machine: its paths, private-file writes and the local CA."""

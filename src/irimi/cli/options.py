@@ -1,4 +1,4 @@
-"""What the commands' parsers share: the argparse types, and the proxy, map and storage options."""
+"""Shared parser pieces: argparse types, and the proxy, map and storage options."""
 
 import argparse
 import json
@@ -25,8 +25,7 @@ RUN_ID_HELP = (
 
 
 def help_formatted(**kwargs: Any) -> dict[str, Any]:
-    """`add_parser`'s keyword arguments for a command whose description and epilog are laid out
-    by hand, and whose abbreviated flags are refused."""
+    """Return `add_parser` kwargs for hand-laid-out help with abbreviated flags refused."""
     return {
         "allow_abbrev": False,
         "formatter_class": argparse.RawDescriptionHelpFormatter,
@@ -35,8 +34,7 @@ def help_formatted(**kwargs: Any) -> dict[str, Any]:
 
 
 def epilog(examples: list[str], exit_codes: str | None = None) -> str:
-    """A command's `--help` epilog: its examples, then its `exit status:` table when it has one
-    (`exitcodes.help_table`)."""
+    """Return a `--help` epilog: the examples, then the exit status table if given."""
     text = "examples:\n" + "\n".join(f"  {example}" for example in examples)
     return text if exit_codes is None else f"{text}\n\n{exit_codes}"
 
@@ -56,9 +54,7 @@ SHADOW_EXIT_CODES = exitcodes.help_table(
 
 
 def _host_arg(value: str) -> str:
-    """argparse type for --base-url-host: a bare host name, lower-cased. The port belongs on the
-    request path (/127.0.0.1:8443/...), so a value with a scheme, port or path is a mistake that
-    would otherwise never match anything."""
+    """Parse a bare, lower-cased host name; a scheme, port or path would never match."""
     host = value.strip().lower()
     if not host or "/" in host or ":" in host:
         raise argparse.ArgumentTypeError(
@@ -69,15 +65,10 @@ def _host_arg(value: str) -> str:
 
 
 def _target_arg(value: str) -> tuple[str, str, str]:
-    """argparse type for --target '<host>[<path>]=<url>'.
+    """Parse --target '<host>[<path>]=<url>' into (host, path, url).
 
-    `api.stripe.com=http://127.0.0.1:3000` sets the service target;
-    `api.stripe.com/v1/refunds=http://127.0.0.1:3000/refund` sets one route's. The URL is
-    validated by the map loader, which owns every target rule.
-
-    A trailing bare slash is the service too: `api.stripe.com/=<url>` is how a reader used to
-    `proxy_pass` spells "the whole service", and taken as the route path `/` it would match no
-    map's route.
+    A bare host, or a host with only a trailing `/`, targets the whole service. The map loader
+    validates the URL.
     """
     spec, sep, url = value.partition("=")
     host, slash, path = spec.strip().partition("/")
@@ -92,9 +83,10 @@ def _target_arg(value: str) -> tuple[str, str, str]:
 
 
 def add_proxy_options(parser: argparse.ArgumentParser, port: int) -> None:
-    """The options `serve`, `shadow` and `replay` share, in three groups: the proxy's, the maps'
-    and the store's. `port` is the default `--port`: 0 for any free port, which the command irimi
-    runs is told in its environment."""
+    """Add the proxy, map and store options `serve`, `shadow` and `replay` share.
+
+    `port` is the default `--port`; 0 picks any free port.
+    """
     proxy = parser.add_argument_group("proxy options")
     default = f"{port}; 0 picks any free port" if port else "0, any free port"
     proxy.add_argument(
@@ -126,7 +118,7 @@ def add_proxy_options(parser: argparse.ArgumentParser, port: int) -> None:
 
 
 def add_map_options(parser: argparse.ArgumentParser) -> None:
-    """The options that change what the loaded maps say: targets, and where they may point."""
+    """Add the target options, which change what the loaded maps say."""
     maps = parser.add_argument_group("map options")
     maps.add_argument(
         "--target",
@@ -171,7 +163,7 @@ def add_store_option(
 
 
 def entrypoint_arg(value: str) -> str:
-    """argparse type for --entrypoint: a function's `module:qualname`, as a trigger records it."""
+    """Parse --entrypoint: a function's `module:qualname`."""
     module, sep, qualname = value.partition(":")
     if not sep or not module.strip() or not qualname.strip():
         raise argparse.ArgumentTypeError(f"{value!r}: give the function as module:qualname")
@@ -179,14 +171,13 @@ def entrypoint_arg(value: str) -> str:
 
 
 def args_arg(value: str) -> dict[str, JSONValue]:
-    """argparse type for --args: a JSON object, `{parameter: captured value}`, the shape a trigger
-    records its args in."""
+    """Parse --args: a JSON object of `{parameter: captured value}`."""
     try:
         parsed = json.loads(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"--args is not JSON: {exc}") from None
     except RecursionError:
-        # argparse would let this through as a traceback where a usage error belongs.
+        # Otherwise argparse would show a traceback instead of a usage error.
         raise argparse.ArgumentTypeError("--args is nested deeper than it can be read") from None
     if not isinstance(parsed, dict):
         raise argparse.ArgumentTypeError("--args is a JSON object of {parameter: value}")
@@ -194,7 +185,7 @@ def args_arg(value: str) -> dict[str, JSONValue]:
 
 
 def args_file_arg(value: str) -> dict[str, JSONValue]:
-    """argparse type for --args-file: `--args`, read from the file `value` names."""
+    """Parse --args-file: `--args` read from the file `value`."""
     try:
         text = Path(value).read_text(encoding="utf-8")
     except OSError as exc:
@@ -203,7 +194,7 @@ def args_file_arg(value: str) -> dict[str, JSONValue]:
 
 
 def positive_int(value: str) -> int:
-    """argparse type for --limit: a whole number of runs, at least one."""
+    """Parse --limit: a whole number of runs, at least one."""
     try:
         number = int(value)
     except ValueError:

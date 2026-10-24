@@ -1,54 +1,46 @@
+"""`core.exchange`: requests, responses and exchanges, their defaults and their timing."""
+
 from dataclasses import replace
 
-from irimi.core.exchange import Exchange, Request, Response, clip_chunks, media_type
+from irimi.core.exchange import clip_chunks, media_type
+from tests.support import builders
 
 
-def _req(scheme: str = "https", port: int = 443, query: str = "") -> Request:
-    return Request(
-        method="GET",
-        scheme=scheme,
-        host="api.stripe.com",
-        port=port,
-        path="/v1/charges",
-        query=query,
-        headers=(),
-        body=b"",
-    )
-
-
-def test_url_https_default_port_omitted():
-    assert _req().url == "https://api.stripe.com/v1/charges"
+def test_a_url_leaves_out_the_https_default_port():
+    assert builders.request().url == "https://api.stripe.com/v1/charges"
 
 
 def test_url_https_non_default_port_included():
-    assert _req(port=8443).url == "https://api.stripe.com:8443/v1/charges"
+    assert builders.request(port=8443).url == "https://api.stripe.com:8443/v1/charges"
 
 
 def test_url_query_appended_only_when_non_empty():
-    assert _req(query="limit=1").url == "https://api.stripe.com/v1/charges?limit=1"
-    assert "?" not in _req(query="").url
+    assert builders.request(query="limit=1").url == "https://api.stripe.com/v1/charges?limit=1"
+    assert "?" not in builders.request(query="").url
 
 
-def test_url_http_default_port_omitted():
-    assert _req(scheme="http", port=80).url == "http://api.stripe.com/v1/charges"
+def test_a_url_leaves_out_the_http_default_port():
+    assert builders.request(scheme="http", port=80).url == "http://api.stripe.com/v1/charges"
 
 
 def test_header_is_found_case_insensitively_and_first_wins():
-    r = replace(_req(), headers=(("Content-Type", "a"), ("content-type", "b")))
+    r = replace(builders.request(), headers=(("Content-Type", "a"), ("content-type", "b")))
     assert r.header("content-type") == "a"
     assert r.header("x-absent") is None
 
 
 def test_without_header_strips_every_copy_and_is_the_same_object_when_absent():
-    r = replace(_req(), headers=(("irimi-rewrote", "x"), ("a", "1"), ("Irimi-Rewrote", "y")))
+    r = replace(
+        builders.request(), headers=(("irimi-rewrote", "x"), ("a", "1"), ("Irimi-Rewrote", "y"))
+    )
     assert r.without_header("irimi-rewrote").headers == (("a", "1"),)
-    plain = _req()
+    plain = builders.request()
     assert plain.without_header("irimi-rewrote") is plain
 
 
-def test_path_and_query():
-    assert _req(query="limit=1").path_and_query == "/v1/charges?limit=1"
-    assert _req().path_and_query == "/v1/charges"
+def test_path_and_query_is_the_path_with_its_query():
+    assert builders.request(query="limit=1").path_and_query == "/v1/charges?limit=1"
+    assert builders.request().path_and_query == "/v1/charges"
 
 
 def test_media_type_drops_parameters_and_case():
@@ -56,35 +48,23 @@ def test_media_type_drops_parameters_and_case():
     assert media_type("") == ""
 
 
-def _exchange() -> Exchange:
-    return Exchange(
-        request=_req(),
-        response=Response(status=200, headers=(), body=b""),
-        service="api.stripe.com",
-        operation="GET /v1/charges",
-        kind="read",
-        answered_by="live",
-        run_id="7f3a",
-    )
-
-
-def test_exchange_default_flags_empty():
-    assert _exchange().flags == ()
+def test_an_exchange_has_no_flags_by_default():
+    assert builders.exchange().flags == ()
 
 
 def test_exchanges_from_same_args_are_equal():
-    assert _exchange() == _exchange()
+    assert builders.exchange() == builders.exchange()
 
 
-def test_exchange_default_door_is_forward():
-    assert _exchange().door == "forward"
+def test_an_exchange_came_through_the_proxy_by_default():
+    assert builders.exchange().door == "forward"
 
 
 def test_answered_by_names_every_way_an_exchange_is_answered():
-    """`delegated` is a frozen seam value for an answer from a target, counted apart in the
-    summary. `fake-L1` is the fixture answer, and `fake-L0` stays beside it: L0 is the echo every
-    route without a fixture is still answered with. `irimi` is an error irimi answered with.
-    """
+    """`AnsweredBy` names live, echo, fixture, target, overlay, recording and irimi's own errors.
+
+    `delegated` is the on-disk value for a target's answer; `fake-L0` is the echo and `fake-L1`
+    the fixture."""
     from typing import get_args
 
     from irimi.core.exchange import AnsweredBy
@@ -101,9 +81,7 @@ def test_answered_by_names_every_way_an_exchange_is_answered():
 
 
 def test_fake_level_is_the_locally_answered_subset_of_answered_by():
-    """`services.fake_response` returns a `FakeLevel`, which the Exchange carries as an
-    `AnsweredBy`. Keeping it a subset is what lets the faker name the level without being able to
-    say `live`."""
+    """`FakeLevel` is a subset of `AnsweredBy`, so the faker can name its level but never `live`."""
     from typing import get_args
 
     from irimi.core.exchange import AnsweredBy, FakeLevel
@@ -113,16 +91,14 @@ def test_fake_level_is_the_locally_answered_subset_of_answered_by():
 
 
 def test_target_defaults_to_empty_and_records_a_delegated_address():
-    ex = _exchange()
+    ex = builders.exchange()
     assert ex.target == ""
     ex = replace(ex, target="http://127.0.0.1:3000/refund")
     assert ex.target == "http://127.0.0.1:3000/refund"
 
 
 def test_overlay_is_not_a_fake_level():
-    """`FakeLevel` is what `services.fake_response` may return, and the overlay fakes nothing: it
-    edits a real response. Keeping it out is what stops a read from being counted as a faked
-    write by anything that reads the level."""
+    """`overlay` is not a `FakeLevel`: the overlay edits a real response and fakes no write."""
     from typing import get_args
 
     from irimi.core.exchange import FakeLevel
@@ -131,14 +107,14 @@ def test_overlay_is_not_a_fake_level():
 
 
 def test_overlay_fidelity_is_unset_until_the_overlay_considers_an_exchange():
-    ex = _exchange()
+    ex = builders.exchange()
     assert ex.overlay is None
     ex = replace(ex, overlay="partial")
     assert ex.overlay == "partial"
 
 
 def test_stream_chunks_are_empty_unless_a_response_streamed():
-    assert _exchange().stream_chunks == ()
+    assert builders.exchange().stream_chunks == ()
 
 
 def test_clip_chunks_keeps_the_chunks_of_a_body_s_first_bytes():
@@ -155,3 +131,15 @@ def test_clip_chunks_keeps_the_chunks_of_a_body_s_first_bytes():
 def test_clip_chunks_is_the_same_tuple_when_nothing_is_cut():
     chunks = (3, 4, 5)
     assert clip_chunks(chunks, 12) is chunks
+
+
+def test_an_exchange_carries_the_callers_timestamps():
+    ex = builders.exchange(response=None, started_at=1.5, ended_at=2.25)
+    assert (ex.started_at, ex.ended_at) == (1.5, 2.25)
+    assert builders.exchange(response=None).started_at == 0.0
+
+
+def test_an_exchange_never_ends_before_it_started():
+    """The wall clock can step back mid-exchange; a stored run's reader subtracts the two."""
+    ex = builders.exchange(response=None, started_at=2.25, ended_at=1.5)
+    assert (ex.started_at, ex.ended_at) == (2.25, 2.25)

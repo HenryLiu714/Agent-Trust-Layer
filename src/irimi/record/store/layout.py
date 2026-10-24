@@ -1,8 +1,4 @@
-"""Where each file lives under a store's root, and how a run directory's files are read back.
-
-A RUN ID NAMES A DIRECTORY ONLY WHEN THIS STORE CAN USE IT AS ONE. `trace.is_valid_run_id` is the
-path-traversal guard, and it is checked again here (`names_a_run_dir`) rather than trusted.
-"""
+"""Where each file lives under a store's root, and how a run directory's files are read back."""
 
 import json
 import os
@@ -15,7 +11,6 @@ BLOBS_DIR = "blobs"
 RUNS_DIR = "runs"
 RUN_FILE = "run.json"
 EVENTS_FILE = "events.jsonl"
-# The file a `serve` holds an exclusive lock on for as long as it runs.
 SERVE_LOCK_FILE = "serve.lock"
 
 # How much of the end of an events.jsonl resuming a run reads to find its last `seq`.
@@ -23,7 +18,7 @@ RESUME_TAIL = 1024 * 1024
 
 
 class StoreLayout:
-    """The one statement of where each file lives under a store's root."""
+    """Where each file lives under a store's root."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -33,31 +28,24 @@ class StoreLayout:
         self.serve_lock = root / SERVE_LOCK_FILE
 
     def run_dir(self, run_id: str) -> Path:
-        """The directory of `run_id`, which the caller has checked with `trace.is_valid_run_id`."""
+        """Return `run_id`'s directory; the caller has checked it with `trace.is_valid_run_id`."""
         return self.runs / run_id
 
     def blob(self, sha256: str) -> Path:
-        """The file of a body, whose digest the caller has checked against trace.SHA256_PATTERN."""
+        """Return a body's file; the caller has checked the digest against `SHA256_PATTERN`."""
         return self.blobs / sha256
 
 
 def names_a_run_dir(run_id: object) -> bool:
-    """True when `run_id` may be a directory under `runs/`: `trace.is_valid_run_id`, the
-    path-traversal guard, checked again rather than trusted, and not `unattributed`, which is
-    the name of "no run". Anything else is stored in `unattributed/` and never opens a path.
-
-    Public because the control endpoint refuses, with a 400, the run ids this store would only
-    count as a drop: the agent is told, rather than its run silently going missing."""
+    """Return True when `run_id` is a safe name for a directory in `runs/` (not `unattributed`)."""
     return isinstance(run_id, str) and run_id != UNATTRIBUTED and trace.is_valid_run_id(run_id)
 
 
 def read_run_json(directory: Path) -> RunRecord:
-    """A run directory's `run.json`, for the writer resuming a run and the reader alike. Raises
-    OSError when the file cannot be read now, and TraceFormatError, and nothing else, for what it
-    holds when this irimi cannot read that: a newer version, bytes that are not UTF-8 or JSON
-    (ValueErrors), or JSON nested past the parser's depth (a RecursionError, which would otherwise
-    escape `list_runs` and hide every other run). Every refusal names the file, a decoder's
-    as well as the parser's: `'name' is a list` alone does not say which run.json it is."""
+    """Return a run directory's `run.json`.
+
+    Raises OSError, or TraceFormatError naming the file for any content this irimi cannot read.
+    """
     path = directory / RUN_FILE
     data = path.read_bytes()
     try:
@@ -67,9 +55,7 @@ def read_run_json(directory: Path) -> RunRecord:
 
 
 def resume_seq(events: Path) -> int:
-    """The `seq` after the last readable line of `events`, 1 for a new file. Only the last
-    RESUME_TAIL bytes are read, unless no whole readable line is inside them. A final line with no
-    newline was cut off by a crash: it is truncated away, so the next line starts clean."""
+    """Return the next `seq` for `events` (1 if new), truncating a final line a crash cut off."""
     if not events.exists():
         return 1
     size = events.stat().st_size
@@ -88,11 +74,7 @@ def resume_seq(events: Path) -> int:
 
 
 def _last_seq(data: bytes) -> int | None:
-    """The `seq` of the last whole line in `data` that parses and holds an integer `seq`, or None
-    when none does. A tail's first line may start mid-line, and a damaged line may hold anything:
-    `{"seq": 1e400}` is infinity, which `int()` refuses with an OverflowError, and a line nested
-    past the parser's depth is a RecursionError. Either one escaping would drop every later event
-    of the run, on every restart."""
+    """Return the `seq` of the last whole line in `data` that parses, or None. Never raises."""
     for line in reversed(data[: data.rfind(b"\n") + 1].splitlines()):
         try:
             seq = json.loads(line)["seq"]

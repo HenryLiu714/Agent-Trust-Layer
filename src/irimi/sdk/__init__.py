@@ -1,12 +1,11 @@
-"""The irimi SDK: mark where each of an agent's runs starts and ends, and label the tools the
-proxy cannot see.
+"""The irimi SDK: mark where an agent's runs start and end, and label tools the proxy cannot see.
 
     @sdk.trigger
     def handle(ticket: Ticket) -> None: ...
 
-The SDK is inert without irimi: it acts only while `IRIMI_ENGINE_ACTIVE=1`, so it is safe to leave
-in production code. It never raises into the agent. This module is its whole public surface;
-replaying a stored run from a test is `irimi.testing`.
+The SDK acts only while `IRIMI_ENGINE_ACTIVE=1`, so it is safe to leave in production code.
+The SDK never raises: its own failures are logged and swallowed, never raised into the agent.
+To replay a stored run from a test, use `irimi.testing`.
 """
 
 from irimi.sdk._context import current_run_id, is_active, propagate

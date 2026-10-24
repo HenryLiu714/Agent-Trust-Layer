@@ -26,8 +26,10 @@ classifiers = [
 requires-python = ">=3.12" # floor for end users; development pins 3.14 via .python-version
 dependencies = [
     "cryptography>=42",
-    # 12 is the first whose addon manager awaits a coroutine hook, and the decision is one;
-    # 12.2.1 the first that resolves with the other floors. <13: the addon uses hook internals.
+    # >=12 because `IrimiAddon.request` is a coroutine hook, and only 12's addonmanager awaits one
+    # (`inspect.iscoroutinefunction` in `invoke_addon`). On 11 the decision would never run.
+    # <13 because the addon depends on mitmproxy's hook internals. 12.2.1 is the lowest 12 that
+    # resolves with the other floors.
     "mitmproxy>=12.2.1,<13",
     # Imported directly to decode a body incrementally, up to a cap. mitmproxy depends on both;
     # >=1.2 because only 1.2's `Decompressor.process` takes `output_buffer_limit`.
@@ -63,12 +65,14 @@ test = [
     "pytest-timeout>=2.4",
     "pytest-xdist>=3.8",
     # The HTTP clients and service SDKs the tests and the workflow agents drive.
+    "anthropic>=2.2",
     "httpx>=0.28",
     "requests>=2.34",
     "slack-sdk>=3.44",
     "stripe>=15.6",
 ]
 examples = [
+    "anthropic>=2.2",
     "slack-sdk>=3.44",
     "stripe>=15.6",
 ]
@@ -138,9 +142,6 @@ ignore = [
     # D400 wants a period; D415 also accepts `?` and `!`. A summary may open with a lower-case
     # name: irimi, argparse, mitmproxy.
     "D400", "D403",
-    # The style guide's blank line after the summary and its imperative mood: enforced once the
-    # docstrings follow it.
-    "D205", "D401",
     # An assert narrows a type mypy cannot follow; none guards input, so `-O` loses no check.
     "S101",
     # A hook and the SDK never raise, so an exception neither can act on is dropped on purpose.
@@ -167,9 +168,12 @@ flake8-bugbear.extend-immutable-calls = [
     "RUF001",
     # A test names a staticmethod's first parameter `self` or `cls` to check nothing binds it.
     "PLW0211",
+    # A test's docstring states the property it checks, not a command.
+    "D401",
 ]
 # The example agents call the URLs their configuration names, through urllib.
 "examples/**" = ["S310"]
+"tests/e2e/workflows/agents/**" = ["S310"]
 
 [tool.mypy]
 python_version = "3.12"

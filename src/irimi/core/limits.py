@@ -1,7 +1,6 @@
-"""Every size bound irimi enforces, one line each, so how they relate is read in one place.
+"""Every size bound irimi enforces, in bytes unless the comment says characters.
 
-Sizes are bytes unless the comment says characters. `tests/test_limits.py` holds the
-relationships between them.
+Pinned by tests/test_limits.py, which holds the relationships between them.
 """
 
 KiB = 1024

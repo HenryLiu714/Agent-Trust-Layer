@@ -3,8 +3,8 @@
     result = testing.replay(run_id)
     assert result.same, result
 
-This module starts the proxy in a subprocess, so it needs `irimi` installed with the proxy in the
-interpreter that runs the test. Agent code imports `irimi.sdk`, never this.
+The proxy runs in a subprocess of the test's interpreter, which must have `irimi` installed.
+Agent code imports `irimi.sdk`, never this.
 """
 
 import json
@@ -26,8 +26,7 @@ __all__ = ["ReplayError", "ReplayResult", "replay"]
 
 
 def _run_irimi(argv: list[str], env: Mapping[str, str]) -> int:
-    """Run `irimi <argv>` with `env` in a subprocess of this interpreter, and return its exit
-    code; replaced in tests."""
+    """Run `irimi <argv>` with `env` in a subprocess and return its exit code."""
     return subprocess.run(
         [sys.executable, "-m", "irimi", *argv], env=dict(env), check=False
     ).returncode
@@ -52,28 +51,24 @@ def replay(
     kwargs: Mapping[str, Any] | None = None,
     store: str | os.PathLike[str] | None = None,
 ) -> ReplayResult:
-    """Replay a stored run through irimi, and return how the replay compared with it.
+    """Replay a stored run in a fresh process and return how it compared with the recording.
 
-    The agent runs in a fresh process under a replay engine that answers from the recording, as
-    `irimi replay` runs it. With no `call`, the run's recorded trigger is called with its recorded
-    args; given `call`, that function is called instead with `args` and `kwargs`, for example to
-    replay an edited version. A replay that ran and differed is a result, not an error.
+    Without `call`, the recorded trigger runs with its recorded args. A replay that differed is a
+    result, not an error.
 
     Args:
         run_id: The stored run to replay.
-        call: A function to call in place of the recorded trigger. It must be importable as
-            `module:qualname`, as a decorated trigger normally is.
-        args: Positional arguments for `call`. They must be ones a run can record and revive.
-        kwargs: Keyword arguments for `call`, under the same rule.
+        call: A function to run instead of the recorded trigger, importable as `module:qualname`.
+        args: Positional arguments for `call`; they must be recordable.
+        kwargs: Keyword arguments for `call`; they must be recordable.
         store: The trace store. Defaults to `$IRIMI_STORE`, else `$IRIMI_HOME/store`.
 
     Returns:
         The `ReplayResult`; `result.same` is true when nothing diverged.
 
     Raises:
-        ReplayError: When `args` or `kwargs` are given without `call`, `call` cannot be imported
-            by its name, its arguments do not bind or cannot be recorded, or the replay exited
-            without writing a result.
+        ReplayError: `args`/`kwargs` without `call`, `call` not importable by name, arguments
+            that do not bind or record, or a replay that wrote no result.
 
     Example:
         result = testing.replay(run_id, handle, args=(Ticket("T-1"),))
@@ -102,9 +97,7 @@ def replay(
 
 
 def _importable(fn: Callable[..., Any]) -> str:
-    """`fn`'s `module:qualname`, which the child imports it by, or ReplayError naming why it
-    would import something else, or nothing: `resolve`'s refusals, `__main__` among them, are
-    the child's, so they are asked of it here, the one rule."""
+    """Return `fn`'s `module:qualname`. Raises ReplayError if the child could not import it."""
     try:
         name = entrypoint(fn, "testing.replay")
     except TypeError as exc:
@@ -119,9 +112,7 @@ def _importable(fn: Callable[..., Any]) -> str:
 
 
 def _captured(fn: Callable[..., Any], args: tuple[Any, ...], kwargs: Mapping[str, Any]) -> Any:
-    """`args` and `kwargs` bound to `fn` and captured as a trigger's are, or ReplayError naming
-    why the child could not be given them: they do not bind, as calling `fn` would say, or which
-    of them does not capture replayably."""
+    """Return the arguments captured as a trigger's. Raises ReplayError naming what fails."""
     try:
         bound = bind(fn, args, kwargs)
     except TypeError as exc:

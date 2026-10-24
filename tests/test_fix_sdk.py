@@ -1,9 +1,4 @@
-"""The SDK as an agent's process meets it, in a fresh interpreter: what importing it loads, at
-any depth, and what it says of a trigger no replay can import.
-
-`tests/test_sdk_surface.py` checks the modules the SDK names; this checks what they pull in. An
-agent's process gets the stdlib and irimi, and nothing it did not install itself.
-"""
+"""The SDK in a fresh interpreter: it imports only the stdlib and irimi, and warns of `__main__`."""
 
 import json
 import os
@@ -78,9 +73,9 @@ print(entrypoints.entrypoint(handle.__wrapped__))
 def test_a_trigger_in_a_package_s_main_is_warned_of_without_sending_the_user_to_python_m(
     tmp_path,
 ):
-    """`python -m pkg` runs `pkg/__main__.py`, which a replay must not import again (it would run
-    the agent's whole main), so its trigger records `__main__` as a script's does. The warning
-    says what is wrong without telling a user who typed `python -m` to type it."""
+    """A trigger in `pkg/__main__.py` records `__main__`, and the warning does not say `python -m`.
+
+    A replay must not import `__main__.py` again: it would run the agent's whole main."""
     package = tmp_path / "pkg"
     package.mkdir()
     (package / "__init__.py").write_text("")
@@ -105,9 +100,9 @@ def test_a_trigger_in_a_package_s_main_is_warned_of_without_sending_the_user_to_
 
 
 def test_a_name_that_is_one_long_key_is_posted_marked_not_empty():
-    """The SDK cuts before irimi redacts, with no key to make a placeholder: a secret the cut
-    crosses becomes `secret_shapes.CUT_MARK`, so a name or a message that is one long key still
-    says something was there, and nothing of the key is posted."""
+    """A name or message that is one long key is posted as CUT_MARK: not empty, and no key.
+
+    The SDK cuts before irimi redacts, with no key to make a placeholder."""
     key = "sk_live_" + "k" * (2 * limits.MAX_POSTED_MESSAGE)
     assert _runs.label(_named, key, "@sdk.read_tool") == secret_shapes.CUT_MARK
     assert ErrorInfo.from_exception(ValueError(key)).message == secret_shapes.CUT_MARK

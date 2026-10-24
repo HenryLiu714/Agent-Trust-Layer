@@ -1,9 +1,4 @@
-"""Name a function by its `module:qualname`, and import the function such a name names.
-
-A trigger records its entrypoint with `entrypoint`, and a replay calls it again through
-`resolve`. Shared by the SDK, `irimi.testing` and a replay's child, so the three agree on which
-functions can be named and found again.
-"""
+"""Name a trigger as `module:qualname`, and import it back from that name for a replay."""
 
 import importlib
 import inspect
@@ -15,13 +10,11 @@ from irimi.protocol.trace import MAIN_MODULE, ErrorInfo, importable_module
 
 
 def entrypoint(f: Callable[..., Any], decorator: str = "@sdk.trigger") -> str:
-    """`f`'s `module:qualname`, which replay imports it by: a function in a module started with
-    `python -m` is named by that module's real name (`trace.importable_module`). Refused with
-    TypeError for what has none: a `functools.partial` or an instance with `__call__`, a function
-    `exec` defined with no `__name__` in its namespace, and a class, which decorated would be
-    replaced by a function, so that `isinstance` against it would break even in production.
-    `decorator` names the one refusing: the tool decorators refuse the same things, for their
-    default name."""
+    """Return `f`'s importable `module:qualname`.
+
+    Raises TypeError naming `decorator` for a class (wrapping breaks `isinstance`) or a callable
+    with no module or qualname.
+    """
     module = getattr(f, "__module__", None)
     qualname = getattr(f, "__qualname__", None)
     if isinstance(f, type) or not isinstance(module, str) or not isinstance(qualname, str):
@@ -38,9 +31,7 @@ def entrypoint(f: Callable[..., Any], decorator: str = "@sdk.trigger") -> str:
 
 
 class NotCallable(Exception):
-    """The trigger cannot be called from what `irimi replay` gave this process: the reason.
-    `cause` is the type of what importing its module raised, as `trace.ErrorInfo` names a type
-    (`builtins.ModuleNotFoundError`), and None when the import was not the trouble."""
+    """The trigger cannot be called; `cause` is the error type a failed import raised, else None."""
 
     def __init__(self, reason: str, cause: str | None = None) -> None:
         super().__init__(reason)
@@ -50,11 +41,8 @@ class NotCallable(Exception):
 def resolve(entrypoint: str) -> Callable[..., Any]:
     """Return the function `entrypoint` (`module:qualname`) names, importing its module.
 
-    A method defined on a class, called without the instance it was bound to, is refused: the run
-    recorded its args without `self`. A `staticmethod` and a `classmethod` are what their class
-    gives. A function in `__main__` is refused too: in a replay's child `__main__` is the child
-    itself, whose `main` would call itself until the stack ran out. An Exception or a SystemExit
-    the import or a lookup raises is NotCallable."""
+    Raises NotCallable for a plain method, anything in `__main__`, or a raising import or lookup.
+    """
     module_name, sep, qualname = entrypoint.partition(":")
     if not sep or not module_name or not qualname:
         raise NotCallable("it is not module:qualname")
@@ -63,7 +51,7 @@ def resolve(entrypoint: str) -> Callable[..., Any]:
     try:
         found: Any = importlib.import_module(module_name)
     except (Exception, SystemExit) as exc:
-        # SystemExit too: a module that parses its argv as it is imported exits on irimi's.
+        # A module that parses argv on import exits on irimi's arguments.
         raise NotCallable(
             f"importing {module_name} raised {type(exc).__name__}: {exc}",
             ErrorInfo.from_exception(exc).type,
@@ -76,8 +64,7 @@ def resolve(entrypoint: str) -> Callable[..., Any]:
         except AttributeError:
             raise NotCallable(f"{module_name} has no {qualname}") from None
         except Exception as exc:
-            # A module's `__getattr__` that imports lazily, or a class attribute's descriptor,
-            # raising: the call is never made, as when the import raises.
+            # A lazy module `__getattr__` or a descriptor can raise anything.
             raise NotCallable(
                 f"looking up {qualname} in {module_name} raised {type(exc).__name__}: {exc}"
             ) from None

@@ -1,13 +1,6 @@
-"""How a request reached irimi, and what irimi makes of it before deciding about it.
+"""Admission: tell a proxied request from a base-URL one, and prepare it for answering.
 
-A request comes through the proxy (the forward door), or as plain HTTP addressed to the listener
-itself, `/<host>/<path>`, which is base-URL mode for SDKs that ignore proxy settings (the reverse
-door). `admit` tells the two apart, answers the control endpoint's requests apart from both,
-rewrites a base-URL request to its upstream, and takes irimi's own headers off the request.
-Pure: the engine carries what it returns onto its flow.
-
-Base-URL mode is loopback-only and relays to an allow-list of exact hosts, whatever address the
-listener is bound to.
+A base-URL request is plain HTTP as `/<host>/<path>`, loopback-only, to allow-listed hosts.
 """
 
 import logging
@@ -23,24 +16,20 @@ logger = logging.getLogger(__name__)
 
 REVERSE_SCHEME = "https"
 REVERSE_DEFAULT_PORT = 443
-# Why a request irimi could not tell a proxy request from a base-URL one for is refused.
 ROUTE_FAILED = "could not route this request"
-# Why a base-URL request irimi could not point at its upstream is refused.
 REWRITE_FAILED = "could not rewrite this request"
 
 
 class ReverseDoorRefused(ValueError):
-    """irimi will not relay this base-URL request. str(exc) is the one-line explanation."""
+    """irimi will not relay this base-URL request; str(exc) is the one-line reason."""
 
 
 @dataclass(frozen=True)
 class Admitted:
-    """A request irimi decides about: as the trace shows it, rewritten to its upstream when it
-    came by base URL and without irimi's own headers, and the run it belongs to.
+    """A request to answer, rewritten to its upstream and stripped of irimi's headers, and its run.
 
-    `listener` is the address and port the request reached irimi at, which no answer target may
-    be. `started_at` is when the engine first saw it. `cut` is whether its body decoded past the
-    cap, so `request.body` is not all of it."""
+    `listener` is where it reached irimi, which no target may be; `cut` means a truncated body.
+    """
 
     request: Request
     run_id: str
@@ -52,8 +41,7 @@ class Admitted:
 
 @dataclass(frozen=True)
 class ControlCall:
-    """A request to irimi's control endpoint, answered by `control.ControlEndpoint` and nothing
-    else. `whole_body` is False when its body decoded past the cap."""
+    """A request to the control endpoint; `whole_body` is False when it decoded past the cap."""
 
     request: Request
     whole_body: bool
@@ -61,9 +49,7 @@ class ControlCall:
 
 @dataclass(frozen=True)
 class Refusal:
-    """A request irimi answers with its own error before deciding about it: the status and the
-    one-line reason. `parsed` is False for a request irimi could not parse, which is recorded
-    unclassified."""
+    """A request irimi refuses with its own error. `parsed=False` records it unclassified."""
 
     request: Request
     door: Door
@@ -84,19 +70,16 @@ def admit(
     started_at: float = 0.0,
     cut: bool = False,
 ) -> Admitted | ControlCall | Refusal:
-    """What irimi makes of a request it parsed. `peer` is the address of the client that sent it.
+    """Classify a parsed request by how it arrived. `peer` is the client's address.
 
-    Never a raise for a request irimi cannot route or rewrite: a raise in the engine's hook would
-    forward the flow, and the request may be one addressed to irimi itself. It is a `Refusal`.
+    Never raises (fail-closed hook rule): a request irimi cannot route or rewrite is a `Refusal`.
     """
     try:
         door = detect_door(request, listener[1], listener[0])
     except Exception as exc:
         logger.warning("irimi: could not tell whether this is a proxy or base-URL request: %s", exc)
         return Refusal(request, "forward", 400, ROUTE_FAILED, started_at, cut)
-    # The control endpoint is answered before the base-URL rewrite, which would read `_irimi` as
-    # an upstream host and refuse it, and before `Irimi-Run` is read: a control request names its
-    # run in its path. It is never forwarded, never decided and never recorded as an exchange.
+    # Checked before the rewrite, which refuses `_irimi` as a host; a control path names its run.
     if is_control_request(request, door):
         return ControlCall(request, whole_body=not cut)
     if door == "reverse":
@@ -115,33 +98,21 @@ def admit(
 
 
 def attributed(request: Request, default_run_id: str) -> tuple[str, Request]:
-    """The run `request` belongs to, and the request without irimi's own headers.
+    """Return the run `request` belongs to, and the request without irimi's own headers.
 
-    irimi's own wire vocabulary is never the agent's. `Irimi-Run` names the run, which only irimi
-    asks, so it is read and then taken off: `Exchange.run_id` holds it, and no forward, target or
-    check read carries it to the service. irimi sends no `Irimi-Rewrote`, so one the agent sent
-    goes too."""
+    Only irimi may set irimi's headers, so neither reaches the service.
+    """
     run_id = wire.attribute_run(request, default_run_id)
     return run_id, request.without_header(REWROTE_HEADER).without_header(RUN_HEADER)
 
 
 def is_control_request(request: Request, door: Door) -> bool:
-    """A request addressed to irimi's own listener (`detect_door` says `reverse`) whose path
-    starts with CONTROL_PREFIX. Asked BEFORE the base-URL rewrite, which would read `_irimi` as an
-    upstream host and refuse it with a 403. An absolute-form request through the forward proxy
-    that names the listener is `reverse` too, so it is handled the same."""
+    """Return True for a request to irimi's own listener whose path starts with CONTROL_PREFIX."""
     return door == "reverse" and request.path.startswith(CONTROL_PREFIX)
 
 
 def detect_door(request: Request, listen_port: int, local_address: str = "") -> Door:
-    """A request addressed to the listener itself (`Host: 127.0.0.1:4000`, or an absolute URL
-    naming the listener under any spelling of loopback) came through the reverse door. Everything
-    else is the forward door. A name on our own port that is not a recognised literal is resolved,
-    because forwarding it would make the proxy connect to itself in a loop.
-
-    `local_address` is the address the connection arrived on. A listener bound wider than loopback
-    is also this machine at that address, which an agent in another container reaches by name
-    (`http://irimi:4000/...`): a host that is it, or resolves to it, is the listener too."""
+    """Return `reverse` for a request to the listener itself (never forwarded), else `forward`."""
     if request.port != listen_port:
         return "forward"
     if netaddr.is_self_host(request.host) or netaddr.resolves_to_self(request.host, local_address):
@@ -150,20 +121,16 @@ def detect_door(request: Request, listen_port: int, local_address: str = "") -> 
 
 
 def _through_reverse_door(request: Request, peer: str, allowed_hosts: frozenset[str]) -> Request:
-    """A base-URL request rewritten to its upstream. Raises ReverseDoorRefused for a client that is
-    not on this machine or a host that is not allowed."""
+    """Rewrite a base-URL request to its upstream; raise ReverseDoorRefused off loopback."""
     if not netaddr.is_loopback(peer):
         raise ReverseDoorRefused(f"base-URL requests come from loopback only; refusing {peer!r}")
     return rewrite_reverse(request, allowed_hosts)
 
 
 def rewrite_reverse(request: Request, allowed_hosts: frozenset[str]) -> Request:
-    """`/<host>[:<port>]/<rest>` on the listener becomes `https://<host>[:<port>]/<rest>`.
+    """Rewrite `/<host>[:<port>]/<rest>` on the listener to `https://<host>[:<port>]/<rest>`.
 
-    The scheme is always https and the port defaults to 443. The query, method, body and headers
-    are kept; the `host` header is rewritten to the upstream authority, or added if the request
-    had none. Raises ReverseDoorRefused when the first segment is missing, is an IPv6 literal, has
-    a bad port, or names a host (compared lower-case) that is not in `allowed_hosts`.
+    Raises ReverseDoorRefused for a missing or IPv6 host, a bad port, or a host not allowed.
     """
     # One slash off, not every one: `//v1/x` names no host, not the host `v1`.
     segment, _, rest = request.path.removeprefix("/").partition("/")

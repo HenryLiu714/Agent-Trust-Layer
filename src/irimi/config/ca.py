@@ -13,8 +13,7 @@ from irimi.config import paths
 from irimi.config.files import DIR_MODE, FILE_MODE, private_dir, write_private
 
 CA_COMMON_NAME = "irimi local CA"
-# About two years, so a CA someone trusted somewhere and forgot stops working long before ten;
-# `irimi init --force` makes a new one.
+# About two years, so a forgotten trusted CA stops working; `irimi init --force` makes a new one.
 CA_VALID_DAYS = 825
 # How long before the CA expires the commands that start a proxy warn that it will.
 EXPIRY_WARNING = dt.timedelta(days=30)
@@ -34,26 +33,24 @@ def ca_paths() -> CAPaths:
 
 
 def ca_exists(p: CAPaths) -> bool:
-    """True only when both the key and the cert are present."""
+    """Return True only when both the key and the cert are present."""
     return p.key.is_file() and p.cert.is_file()
 
 
 def ca_partial(p: CAPaths) -> bool:
-    """True when exactly one of key/cert is present (a broken or interrupted init)."""
+    """Return True when exactly one of key/cert is present (a broken or interrupted init)."""
     return p.key.is_file() != p.cert.is_file()
 
 
 def state(p: CAPaths) -> Literal["absent", "partial", "present"]:
-    """Whether the CA is there: both files, exactly one of them (a broken or interrupted init), or
-    neither."""
+    """Return whether both CA files, exactly one (an interrupted init), or neither are present."""
     if ca_exists(p):
         return "present"
     return "partial" if ca_partial(p) else "absent"
 
 
 def expires_at(cert: Path) -> dt.datetime | None:
-    """When the CA certificate at `cert` stops being valid, in UTC, or None when it cannot be
-    read: a CA that is not there is refused elsewhere, with its own message."""
+    """Return when the CA certificate at `cert` expires, in UTC, or None if it cannot be read."""
     try:
         return x509.load_pem_x509_certificate(cert.read_bytes()).not_valid_after_utc
     except (OSError, ValueError):
@@ -111,8 +108,10 @@ def generate_ca(p: CAPaths) -> None:
 
 
 def write_mitm_bundle(p: CAPaths, confdir: Path) -> Path:
-    """Write <confdir>/mitmproxy-ca.pem = CA key + CA cert (mode 0600), the file mitmproxy's
-    TlsConfig loads to mint per-host leaf certs. Always rewritten so `init --force` is picked up."""
+    """Write `<confdir>/mitmproxy-ca.pem`, the CA key plus cert (mode 0600), and return its path.
+
+    mitmproxy's TlsConfig loads it to mint per-host leaf certs. It is always rewritten, so
+    `init --force` is picked up."""
     bundle = confdir / paths.MITM_CA_BUNDLE_NAME
     private_dir(confdir)
     os.chmod(confdir, DIR_MODE)  # an existing directory too

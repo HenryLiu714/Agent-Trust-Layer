@@ -16,8 +16,7 @@ from irimi.report.model import RunView
 from irimi.report.summary import summary_lines, tls_failure_lines
 from irimi.servicemaps import MapIndex
 
-# How often serve's main thread looks for a signal or a stop. A handler only records the
-# signal, and the main thread acts on it within this long.
+# How often the main thread checks for a recorded signal or a stop.
 SERVE_POLL_S = 0.1
 
 
@@ -47,42 +46,27 @@ def cmd_serve(
     *,
     engine_factory: compose.EngineFactory = compose.build_engine,
 ) -> int:
-    """`irimi serve`: the engine as a sidecar, with no child process, until SIGINT or SIGTERM, or
-    until `stop` is set.
+    """Run `irimi serve` until SIGINT, SIGTERM, or `stop` is set (for callers on another thread).
 
-    Runs are named by their requests: each SDK run's `Irimi-Run`, and `unattributed` for a request
-    that names none. Each exchange and tool call prints its line as it happens, and each run its
-    summary once its end is on disk, under a `--- run <id> ---` line, built from the store as
-    `irimi runs show` builds it. Nothing is kept per exchange here.
-
-    Both signals stop the engine and close the store, which writes what is queued for up to
-    `store.CLOSE_TIMEOUT_S`, release the store's `serve.lock`, and exit 0. A run still open stays
-    incomplete: no end is written for it. A run whose end was queued before the signal still
-    prints its summary as the store drains; nothing else is printed.
-
-    `stop` is the way out that needs no signal, for a caller that runs serve on a thread of its
-    own: the sample-workflow harness, whose fake internet resolves names only in its own process.
-    The signal handlers are installed only on the main thread, where Python allows them, and first
-    of all, so no signal finds serve without them.
+    Either signal drains the store, releases `serve.lock` and exits 0; a run still open gets no
+    end. Signal handlers go in first, so no signal finds serve without them.
     """
     with runner.stopping_on_signals() as signalled:
         return _run_serve(args, stop or threading.Event(), signalled, engine_factory)
 
 
 class _ServeOutput:
-    """Everything serve prints while it serves: a line per exchange and per tool call as
-    each happens, from the engine's thread, and each run's summary once its end is on disk, from
-    the store's writer thread. One lock covers every line, so two runs' summaries never
-    interleave, nor does an exchange's line split one."""
+    """What serve prints: a line per exchange and tool call, and each run's summary when it ends.
+
+    Called from the engine and store writer threads; one lock keeps lines from interleaving.
+    """
 
     def __init__(self, store_root: Path, quiet: bool = False) -> None:
         self.store_root = store_root
         self.quiet = quiet
         self._printing = threading.Lock()
-        # Exchanges no run named, which no run's summary prints: the stop line points at them.
-        self.unattributed = 0
-        # The CA a client refusing irimi's certificate is told to trust, and the hosts it was
-        # told for: no run's summary says a handshake failed, so serve warns once per host.
+        self.unattributed = 0  # counted for the stop line, since no summary shows them
+        # No run's summary shows a failed handshake, so serve warns once per host itself.
         self.ca_cert: Path | None = None
         self._tls_warned: set[str] = set()
 
@@ -98,13 +82,12 @@ class _ServeOutput:
             self.say([terminal.exchange_line(ex)])
 
     def tool_call(self, call: ToolCall) -> None:
-        """The tool's name and what it raised, never its args or result, which are stored
-        redacted and would print raw here."""
+        """Print the tool's name and error, never its args or result, which would print raw."""
         if not self.quiet:
             self.say([terminal.tool_call_line(call)])
 
     def tls_failure(self, host: str) -> None:
-        """A client that refused irimi's certificate for `host`, warned of the first time."""
+        """Warn, once per host, that a client refused irimi's certificate for `host`."""
         if host in self._tls_warned:
             return
         self._tls_warned.add(host)
@@ -112,10 +95,10 @@ class _ServeOutput:
         self.say([f"warning: {line.strip()}"], err=True)
 
     def run_ended(self, index: MapIndex, run_id: str) -> None:
-        """The run's summary, read back from the store as `irimi runs show` reads it, under
-        `--- run <id> ---`. Called on the store's writer thread after it wrote the run's end, so
-        the run is whole on disk. A run that cannot be read back is one warning naming the
-        exception's type only, as the store logs its own: a message may quote what it read."""
+        """Print the run's summary from the store, on the writer thread after its end is written.
+
+        A read failure warns with the exception type only: its message may quote unredacted data.
+        """
         try:
             stored = compose.load_stored_run(self.store_root, run_id)
         except CliError as exc:
@@ -132,15 +115,12 @@ def _run_serve(
     signalled: list[int],
     engine_factory: compose.EngineFactory,
 ) -> int:
-    """`cmd_serve` inside its signal handlers: the engine's life, start to stop, with
-    `_ServeOutput` saying what happened. `signalled` holds each signal that arrived."""
+    """Run the engine from start to stop; `signalled` holds each signal that arrived."""
     output = _ServeOutput(compose.store_root(args), args.quiet)
     died = threading.Event()
     run = compose.prepare_run(args, serve=True, on_run_ended=output.run_ended)
     if run is None:
         return exitcodes.ERROR
-    # The store is closed and its lock released on every way out from here, so a signal never
-    # cuts serve short half-way through either.
     with run:
         output.ca_cert = run.ca.cert
         engine = engine_factory(run, output.exchange, output.tool_call, output.tls_failure)

@@ -1,5 +1,4 @@
-"""`irimi shadow -- <command>`: a command run with its HTTP(S) traffic in shadow mode, and the
-child run under an engine that `irimi shadow` and `irimi replay` share (`run_child`)."""
+"""`irimi shadow -- <command>`, and `run_child`, which `irimi replay` shares."""
 
 import argparse
 import contextlib
@@ -42,7 +41,7 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
         ),
     )
     add_proxy_options(shadow, 0)
-    # What follows `--`, which `main` splits off before argparse sees it.
+    # `cmd` is what follows `--`, which `main` splits off before argparse sees it.
     shadow.set_defaults(func=cmd_shadow, cmd=[])
 
 
@@ -64,7 +63,7 @@ def _run_shadow(
     child: runner.Child,
     engine_factory: compose.EngineFactory,
 ) -> int:
-    """`irimi shadow -- <cmd>` inside its SIGTERM handler: the run, start to summary."""
+    """Run `irimi shadow -- <cmd>` from start to summary."""
     run = compose.prepare_run(args)
     if run is None:
         return exitcodes.ERROR
@@ -88,26 +87,20 @@ def process_run(
     trigger: Trigger | None = None,
     replay_of: str | None = None,
 ) -> RunRecord:
-    """The record of the run `irimi shadow` or `irimi replay` starts its child in. Its start is
-    stamped when it is stored, just before the child is spawned."""
+    """Return the child's process run record; `started_at` is set when it is stored."""
     agent_version = os.environ.get(AGENT_VERSION_ENV)
     return RunRecord.process(run_id, argv, agent_version, 0.0, trigger, replay_of)
 
 
 def end_the_childs_line() -> None:
-    """Start irimi's next line at the left margin. The child shares irimi's stdout and may leave
-    its last line open (`curl` prints a body with no newline), and irimi cannot see what it
-    wrote: this newline ends such a line, or leaves one blank line after a child that ended its
-    own."""
+    """Print a newline, since the child may leave its last stdout line open (as `curl` does)."""
     print(flush=True)
 
 
 def _sdk_runs(
     args: argparse.Namespace, process_run_id: str, ran: "ChildResult"
 ) -> dict[str, RunRecord | None]:
-    """The runs the SDK started inside `irimi shadow`'s process, in the order their first event
-    arrived, each with its record read back from the store, or None for one that cannot be."""
-    # Exchanges first, then tool calls, each in the order they came.
+    """Return the SDK runs seen in the child, by first event, with their stored records or None."""
     seen = [
         *(ev.run_id for ev in ran.events if not isinstance(ev, ToolCall)),
         *(ev.run_id for ev in ran.events if isinstance(ev, ToolCall)),
@@ -125,9 +118,7 @@ def _sdk_runs(
 
 @dataclass(frozen=True)
 class ChildSpec:
-    """What a run starts under its engine: the banner's command, `shadow` or `replay`; the
-    child's argv; the run's record, stamped with its start as the child is spawned; and the
-    trigger a replay's child calls (`runner.child_env`)."""
+    """The child to run: banner command (`shadow`/`replay`), argv, run record, replay call."""
 
     banner: str
     argv: list[str]
@@ -135,20 +126,21 @@ class ChildSpec:
     call: ChildCall | None = None
 
 
-# How far a child run got: "not-started", irimi said why and stored no run; "not-spawned", the run
-# was stored but its child could not be spawned; "interrupted", a Ctrl-C reached irimi after its
-# banner and before the run was stored; "ran", the run was stored and its child started, unless a
-# Ctrl-C came between the two.
+# How far a child run got:
+#   not-started  no run stored; irimi printed why
+#   not-spawned  the run was stored but the child could not be spawned
+#   interrupted  Ctrl-C after the banner, before the run was stored
+#   ran          the run was stored and the child started
 ChildStatus = Literal["not-started", "not-spawned", "interrupted", "ran"]
 
 
 @dataclass
 class ChildResult:
-    """A child run under the engine: its exit code, how far it got (`ChildStatus`), how long it
-    ran, and what its summary reads of every exchange and tool call the engine reported meanwhile
-    (`model.for_summary`), in the order they came. Short of "ran", `code` is irimi's own (2, 126,
-    127, 130, 143). `stopped` is the exit code of a SIGINT or SIGTERM that reached irimi while the
-    child ran, and `call` how a replay's call ended, as its child wrote it."""
+    """The result of a child run and the events the engine reported meanwhile.
+
+    Short of "ran", `code` is irimi's own. `stopped` is the exit code of a signal irimi received
+    while the child ran; `call` is how a replay's call ended.
+    """
 
     code: int
     status: ChildStatus = "ran"
@@ -156,14 +148,12 @@ class ChildResult:
     events: list[Event] = field(default_factory=list)
     stopped: int | None = None
     call: CallResult | None = None
-    # How many TLS handshakes clients refused, by the host each asked for.
+    # TLS handshakes clients refused, by host.
     tls_failures: dict[str, int] = field(default_factory=dict)
 
 
 def _cannot_run(program: str) -> tuple[int, str] | None:
-    """The shell's exit code and the line saying why `program` cannot be started, or None when it
-    can. Asked before the engine starts, so a mistyped command prints no banner and stores no
-    run."""
+    """Return the shell exit code and reason `program` cannot start, or None if it can."""
     if os.sep not in program and (os.altsep is None or os.altsep not in program):
         found = shutil.which(program)
         return None if found else (exitcodes.NOT_FOUND, f"command not found: {program}")
@@ -183,11 +173,10 @@ def run_child(
     spec: ChildSpec,
     engine_factory: compose.EngineFactory,
 ) -> ChildResult:
-    """`spec` run as `run`'s child, under its engine, as `irimi shadow` and `irimi replay` run
-    one: the engine started, the banner, the run's record stored before the child exists, the
-    child waited for, the run ended and the engine stopped. The caller closes the run's store. A
-    replay's run ends with what its call raised, as `replay_child` wrote it, and otherwise with
-    the exit code."""
+    """Run `spec` as `run`'s child under its engine, then end the run and stop the engine.
+
+    The caller closes the store.
+    """
     cannot = _cannot_run(spec.argv[0])
     if cannot is not None:
         print(f"error: {cannot[1]}", file=sys.stderr)
@@ -200,16 +189,13 @@ def run_child(
             print(terminal.exchange_line(ex), flush=True)
 
     def on_tool_call(call: ToolCall) -> None:
-        # On the proxy's event loop, after the store took the call: it only appends and
-        # prints. The line names the tool and what it raised, never its args or result, which
-        # are stored redacted and would be printed raw here.
+        # Runs on the proxy's event loop. The line never shows args or results, which would
+        # print unredacted.
         ran.events.append(call)
         if not args.quiet:
             print(terminal.tool_call_line(call), flush=True)
 
     def on_tls_failure(host: str) -> None:
-        # On the proxy's event loop, as the lines above: no flow exists, only a count for the
-        # summary.
         ran.tls_failures[host] = ran.tls_failures.get(host, 0) + 1
 
     engine = engine_factory(run, on_exchange, on_tool_call, on_tls_failure)
@@ -242,8 +228,7 @@ def run_child(
             print("error: terminated before the command started", file=sys.stderr)
             ran.code, ran.status = exitcodes.SIGTERM, "not-started"
             return ran
-        # The process run is stored before the child exists, so every exchange it makes lands in
-        # a run that already has its record.
+        # Stored before the child exists, so every exchange lands in a run with a record.
         run.store.start_run(replace(spec.record, started_at=time.time()))
         ran.status = "ran"
         try:
@@ -257,8 +242,7 @@ def run_child(
             print(f"error: could not run {cmd[0]}: {exc}", file=sys.stderr)
             ran.code, ran.status = exitcodes.CANNOT_EXEC, "not-spawned"
             return ran
-        # The summary's duration is the child's, not the proxy's: what the reader wants to know is
-        # how long the agent ran. monotonic, so a clock change mid-run cannot make it negative.
+        # The summary reports how long the agent ran; monotonic survives clock changes.
         started = time.monotonic()
         ran.code = runner.exit_code_for(runner.wait_for_child(proc, child))
         ran.elapsed = time.monotonic() - started
@@ -267,14 +251,13 @@ def run_child(
     except KeyboardInterrupt:  # Ctrl-C outside wait_for_child's own handling
         ran.code = ran.stopped = exitcodes.SIGINT
     finally:
-        # The run ends before the store closes, once the engine has stopped. An exchange that
-        # finishes after this line is still recorded: a late event is not an error.
+        # An exchange that finishes after the run ends is still recorded.
         if ran.status in ("ran", "not-spawned"):
             if spec.call is not None:
                 ran.call = read_call_outcome(spec.call.outcome_file)
             error = ran.call.error if ran.call is not None else None
             runner.end_process_run(run.store, run.run_id, ran.code, time.time(), error)
-        # An impatient second Ctrl-C lands here, while the engine thread is being joined.
+        # A second Ctrl-C can land while the engine thread is joined.
         with contextlib.suppress(KeyboardInterrupt):
             handle.stop()
     return ran

@@ -1,9 +1,6 @@
-"""The L3 checks as pure functions: the probe each write needs, and the verdict on its answer.
+"""Precondition checks as pure functions: the check read each write needs, and the verdict.
 
-Nothing here issues a read - that is the policy's. These pin what a check makes of a document it is
-handed: it never rejects on one it did not understand, and it never passes on one either. A verdict
-has three answers, and `NOT_EVALUABLE` is the one that says irimi asked and did not find out.
-"""
+A document a check does not understand is `NOT_EVALUABLE`, never a rejection or a pass."""
 
 import pytest
 
@@ -15,7 +12,7 @@ from irimi.services.stripe import preconditions as stripe
 CHARGE_ID = "ch_3QTESTONLY000000"
 
 
-def _refund(**posted):
+def _refund_proposal(**posted):
     return Proposal("refunds.create", {"charge": CHARGE_ID, **posted})
 
 
@@ -53,14 +50,14 @@ def test_the_table_names_both_checks():
 
 
 def test_a_refund_probes_the_charge_it_names():
-    assert stripe.CHARGE_REFUNDABLE.probe(_refund(amount=100)) == Probe(
+    assert stripe.CHARGE_REFUNDABLE.probe(_refund_proposal(amount=100)) == Probe(
         operation="charges.retrieve", params={"charge": CHARGE_ID}
     )
 
 
 def test_a_refund_of_a_fully_refunded_charge_is_charge_already_refunded():
     document = _charge(amount_refunded=4900, refunded=True)
-    rejection = stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=4900), document)
+    rejection = stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(amount=4900), document)
     assert isinstance(rejection, Rejection)
     assert rejection.status == 400
     assert rejection.code == "charge_already_refunded"
@@ -76,7 +73,7 @@ def test_a_refund_of_a_fully_refunded_charge_is_charge_already_refunded():
 
 def test_a_refund_over_the_remaining_amount_is_stripes_amount_error_with_irimis_label():
     document = _charge(amount_refunded=4000)
-    rejection = stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=1000), document)
+    rejection = stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(amount=1000), document)
     assert isinstance(rejection, Rejection)
     assert rejection.status == 400
     assert rejection.code == "amount_too_large"
@@ -94,15 +91,15 @@ def test_a_refund_over_the_remaining_amount_is_stripes_amount_error_with_irimis_
 def test_a_refund_within_the_remaining_amount_passes(amount):
     posted = {} if amount is None else {"amount": amount}
     assert (
-        stripe.CHARGE_REFUNDABLE.verdict(_refund(**posted), _charge(amount_refunded=4000)) is None
+        stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(**posted), _charge(amount_refunded=4000))
+        is None
     )
 
 
 def test_a_boolean_amount_is_not_an_amount():
-    # `True` is an `int` in Python, and read as 1 it would be over the remaining 0. A bool is never
-    # minor units.
+    # `True` is an `int` in Python, but a bool is never minor units.
     document = _charge(amount=0)
-    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=True), document) is None
+    assert stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(amount=True), document) is None
 
 
 @pytest.mark.parametrize(
@@ -111,16 +108,17 @@ def test_a_boolean_amount_is_not_an_amount():
     ids=["no-amount", "string-amount", "null-amount-refunded"],
 )
 def test_a_charge_whose_amounts_are_not_numbers_is_not_evaluable(fields):
-    # Read as 0, a missing charge amount would make every refund "too large": a false rejection.
-    # Passing instead would claim a comparison irimi could not make, so it says neither.
+    # Read as 0, a missing amount would falsely reject every refund; passing would claim a
+    # comparison irimi could not make.
     document = _charge(**fields)
-    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=100), document) is NOT_EVALUABLE
+    assert stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(amount=100), document) is NOT_EVALUABLE
 
 
 def test_a_refund_posting_no_amount_passes_because_stripe_refunds_what_is_left():
-    """Absent `amount` is not an unreadable one: it is Stripe's "refund the remainder", which is
-    never over the remaining amount."""
-    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(), _charge(amount_refunded=100)) is None
+    """A refund with no `amount` passes: Stripe refunds the remainder, which always fits."""
+    assert (
+        stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(), _charge(amount_refunded=100)) is None
+    )
 
 
 def test_a_refund_naming_only_a_payment_intent_has_no_probe():
@@ -145,14 +143,14 @@ def test_a_charge_that_would_leave_the_path_or_is_not_an_id_has_no_probe(charge)
     ids=["not-a-charge", "no-amount-refunded", "a-list", "none"],
 )
 def test_a_document_irimi_did_not_understand_is_neither_rejected_nor_passed(document):
-    """A false rejection is the untruth this path exists to prevent; a false pass is the other
-    half of it, because the summary prints `L3 preconditions passed` off one."""
-    assert stripe.CHARGE_REFUNDABLE.verdict(_refund(amount=99999), document) is NOT_EVALUABLE
+    """A document irimi does not understand is `NOT_EVALUABLE`: neither rejected nor passed."""
+    assert (
+        stripe.CHARGE_REFUNDABLE.verdict(_refund_proposal(amount=99999), document) is NOT_EVALUABLE
+    )
 
 
 def test_a_charge_names_the_currency_its_refund_is_denominated_in():
-    """The one fact this read carries that is not a verdict: the summary formats `4900` as
-    `$49.00` only from a currency irimi really read, and the charge is where it read it."""
+    """The check takes the refund's currency from the charge it read, for the summary to format."""
     assert stripe.CHARGE_REFUNDABLE.currency is not None
     assert stripe.CHARGE_REFUNDABLE.currency(_charge()) == "usd"
     assert stripe.CHARGE_REFUNDABLE.currency(_charge(currency=" jpy ")) == "jpy"
@@ -169,16 +167,13 @@ def test_a_charge_names_the_currency_its_refund_is_denominated_in():
     ],
 )
 def test_a_charge_that_names_no_currency_offers_none(document):
-    """No coercion: a currency irimi is not sure of is no currency, and the amount then prints as
-    the write sent it. A wrong symbol is worse than an unformatted number
-    (`money.format_minor_units`)."""
+    """A charge with no clear currency offers none: a wrong symbol is worse than a bare number."""
     assert stripe.CHARGE_REFUNDABLE.currency is not None
     assert stripe.CHARGE_REFUNDABLE.currency(document) == ""
 
 
 def test_a_slack_post_has_no_currency_to_offer():
-    """`conversations.info` has no such key, and a post has no amount. The field is None rather
-    than a function returning "", so the policy asks nothing of a check that has nothing."""
+    """The Slack check has no currency function: a post has no amount."""
     assert slack.CHANNEL_POSTABLE.currency is None
 
 
@@ -236,8 +231,7 @@ def test_is_member_absent_is_not_evidence_and_passes():
 
 @pytest.mark.parametrize("error", ["ratelimited", "missing_scope", "invalid_auth"])
 def test_an_error_irimi_does_not_model_is_not_evaluable(error):
-    """A missing scope is a `not_evaluable` case, and Slack sends one at HTTP 200 -
-    so the policy's own non-200 rule can never catch it and the verdict must say so."""
+    """A Slack error irimi does not model is `NOT_EVALUABLE`, though Slack sends it at HTTP 200."""
     document = {"ok": False, "error": error}
     assert slack.CHANNEL_POSTABLE.verdict(_post("C0123"), document) is NOT_EVALUABLE
 

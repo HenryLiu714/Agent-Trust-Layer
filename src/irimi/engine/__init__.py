@@ -46,7 +46,7 @@ class EngineConfig:
     confdir: Path
     listen_host: str
     listen_port: int  # 0 = pick a free port
-    reverse_hosts: frozenset[str] = frozenset()  # hosts the reverse door may relay to; empty = none
+    reverse_hosts: frozenset[str] = frozenset()  # hosts base-URL requests may reach; empty = none
     maps: MapIndex = field(default_factory=MapIndex)  # loaded service maps; empty = verb rule only
     mode: EngineMode = Shadow()
 
@@ -61,9 +61,9 @@ class Engine(Protocol):
         ...
 
     async def wait_ready(self) -> None:
-        """Returns once the listener is bound; listen_port() is valid afterwards."""
+        """Return once the listener is bound; listen_port() is valid afterwards."""
         ...
 
     def listen_port(self) -> int | None:
-        """The bound port, or None before ready."""
+        """Return the bound port, or None before ready."""
         ...

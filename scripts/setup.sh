@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot setup for irimi contributors and first-time users.
+# One-shot setup for irimi contributors. To use irimi, install it from PyPI (see the README).
 # Creates the project venv, installs irimi in editable mode, and generates the local CA.
 # Needs uv; it does not install it for you. Safe to run more than once.
 set -euo pipefail
@@ -23,7 +23,7 @@ echo
 uv run irimi init
 
 echo
-echo "Setup complete."
-echo "  Run the CLI:        uv run irimi --help"
-echo "  Run every check:    make check      (or: uv run pytest)"
-echo "  Try the example:    uv sync --group examples, then see CONTRIBUTING.md"
+echo "Setup complete. Next, with no keys and no network:"
+echo "  make demo           an agent under irimi shadow, against fake services"
+echo "  make check          everything CI runs"
+echo "  uv run irimi --help"

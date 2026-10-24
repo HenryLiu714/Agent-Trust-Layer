@@ -1,5 +1,4 @@
-"""The trace store's writer, its deletion of runs and its redaction of a run's end, at the edges a
-store shared by several processes reaches."""
+"""Deleting runs from a store other processes write, and the redaction of a run's end."""
 
 import os
 import time
@@ -88,8 +87,7 @@ def test_runs_rm_never_deletes_a_run_another_process_is_writing(home, capfd):
 
 
 def test_runs_prune_never_deletes_an_idle_run_in_progress(home, capfd):
-    """A run whose agent has not made a call for longer than `--older-than` is still in
-    progress: its files are old, and it has not ended."""
+    """A run idle for longer than `--older-than` but not ended is in progress, and is kept."""
     store = _store(home)
     root = home / paths.STORE_DIR_NAME
     long_ago = time.time() - 3 * 86400
@@ -131,8 +129,9 @@ def test_a_store_waits_for_a_removal_and_removal_waits_for_no_store(tmp_path):
 
 
 def test_a_run_s_end_whose_error_is_one_long_key_is_stored_as_its_placeholder(tmp_path):
-    """An end's error waits for the writer cut, before it is redacted. A key across that cut is
-    hidden there, not dropped, so the stored text is the key's placeholder and never empty."""
+    """An end's error that is one long key is stored as its placeholder, never empty.
+
+    The error waits cut before it is redacted; a key across the cut is hidden there, not dropped."""
     store = DirectoryStore(tmp_path / "store", KEY)
     store.start_run(RunRecord.process("ended01", ("python3",), None, 1.0))
     store.end_run("ended01", 2.0, "error", ErrorInfo(LONG_KEY, LONG_KEY), 1)
@@ -159,8 +158,9 @@ def test_an_end_s_error_is_a_prefix_of_its_redacted_whole_when_a_key_crosses_the
 
 @pytest.mark.parametrize("fails", ["write", "claim"])
 def test_a_run_s_end_is_announced_even_when_it_cannot_be_written(tmp_path, monkeypatch, fails):
-    """The callback drops the run's write log and keys: a disk that refuses the end, or a replay's
-    store that may not write the run, must not keep them for the life of a serve."""
+    """A run's end is announced even when it cannot be written, so its write log and keys go.
+
+    A full disk, or a replay's store that may not write the run, would keep them all serve long."""
     ended: list[str] = []
     root = tmp_path / "store"
     replay_of = "recorded1" if fails == "claim" else None

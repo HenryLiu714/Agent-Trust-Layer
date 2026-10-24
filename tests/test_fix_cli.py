@@ -18,8 +18,7 @@ from irimi.core import exitcodes
 
 
 def _refusal(argv: list[str], capsys: pytest.CaptureFixture[str]) -> list[str]:
-    """What `irimi <argv>` says on stderr as it exits 2 for a bad invocation: the usage line it
-    starts with, then every line from the error on."""
+    """Return the usage line and every line from the error on that `irimi <argv>` exits 2 with."""
     with pytest.raises(SystemExit) as exit_:
         main(argv)
     assert exit_.value.code == exitcodes.ERROR
@@ -118,8 +117,7 @@ def test_an_abbreviated_required_flag_does_not_count_as_given(capsys):
 
 
 def test_replay_offers_no_run_it_refuses(capsys):
-    """`irimi replay unattributed` is refused, so replay's help never offers it; the commands
-    that read the pool do."""
+    """Replay's help never offers `unattributed`, which it refuses; the pool's readers offer it."""
     for argv, offers in (
         (["replay", "--help"], False),
         (["runs", "show", "--help"], True),
@@ -133,8 +131,9 @@ def test_replay_offers_no_run_it_refuses(capsys):
 
 
 def test_serve_warns_once_per_host_whose_client_refused_irimi_s_ca(tmp_path, monkeypatch, capsys):
-    """A client that does not trust irimi's CA never sends a request, so no run's summary can say
-    so: serve warns on stderr, once per host, naming the CA to point the client at."""
+    """Serve warns on stderr, once per host, of a client refusing irimi's CA, naming the CA.
+
+    Such a client never sends a request, so no run's summary can say so."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
     ca.generate_ca(ca.ca_paths())
     elsewhere = tmp_path / "elsewhere"
@@ -177,8 +176,9 @@ def test_serve_warns_once_per_host_whose_client_refused_irimi_s_ca(tmp_path, mon
 def _stderr_once_it_says(
     text: str, capsys: pytest.CaptureFixture[str], timeout: float = 10
 ) -> list[str]:
-    """serve's stderr lines, read until one holds `text` and for half a second more, so a
-    second handshake's report, on the proxy's loop as the first was, has had its time too."""
+    """Return serve's stderr lines until one holds `text`, and for half a second more.
+
+    The extra half second gives a second handshake's report, on the same loop, its time too."""
     lines: list[str] = []
     deadline = time.monotonic() + timeout
     while not any(text in line for line in lines):

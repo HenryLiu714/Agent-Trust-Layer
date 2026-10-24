@@ -1,5 +1,4 @@
-"""The engine's own answers to HEAD carry no content, as the control endpoint's do; and the edges
-of what it reads off a request: header names, a base-URL path, a posted tool call."""
+"""The engine's answers to HEAD carry no content; header names, base-URL paths and tool calls."""
 
 import asyncio
 import json
@@ -79,8 +78,7 @@ def engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[in
 
 
 def _two_on_one_connection(port: int, first: str, then: Callable[[str], str]) -> bytes:
-    """`first`, then `then(host)`, written at once on one connection, and everything read back
-    until the health answer's JSON ends."""
+    """Send `first`, then `then(host)`, on one connection; return all read until the health JSON."""
     host = f"127.0.0.1:{port}"
     sent = first.replace("{host}", host) + then(host)
     with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
@@ -100,9 +98,9 @@ def _health(host: str) -> str:
 def test_a_refused_head_gets_no_body_and_the_connection_stays_usable(
     engine: tuple[int, _Kept],
 ) -> None:
-    """A base-URL HEAD for a host irimi does not relay is refused 403. Its JSON would be read as
-    the start of the connection's next response, so it goes without content or a Content-Length,
-    and is recorded as sent."""
+    """A refused base-URL HEAD gets a 403 with no content or Content-Length, recorded as sent.
+
+    Its JSON would be read as the start of the connection's next response."""
     port, store = engine
     received = _two_on_one_connection(
         port, "HEAD /evil.example.com/x HTTP/1.1\r\nhost: {host}\r\n\r\n", _health
@@ -178,8 +176,9 @@ def test_a_base_url_path_whose_first_segment_is_empty_names_no_host(path: str) -
 
 
 def test_a_tool_call_posted_without_awaited_is_refused_and_the_sdk_always_sends_it() -> None:
-    """`awaited` is required: 0.1.0's SDK posted it on every call and its store wrote it on every
-    line, so only a post made by hand can lack it, and it is told which field."""
+    """A tool call posted without `awaited` is refused 400, naming it; the SDK always sends it.
+
+    The SDK has posted it on every call since 0.1.0, so only a hand-made post can lack it."""
     call = ToolCall("tc1", "run1", "m:f", "write", "shadow", {}, None, None, 1.0, 2.0)
     posted = trace.tool_call_to_json(call)
     assert posted["awaited"] is False

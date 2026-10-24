@@ -1,10 +1,7 @@
-"""The `irimi` command: the parser, assembled from each command module's `register`, and the
-dispatch to the command typed.
+"""The `irimi` command: the parser, built from each command module's `register`, and dispatch.
 
-Each command lives in a module of its own (`init`, `serve`, `shadow`, `maps`, `runs`,
-`replay_cmd`), which imports what it needs at its top. `main` imports only the module of the
-command typed, so a command loads only what it runs; `options` holds what their parsers share,
-and `compose` the composition root that the commands which start a proxy share.
+`main` imports only the typed command's module, so a command loads only what it runs. `options`
+holds shared parser options; `compose` is the composition root for commands that start a proxy.
 """
 
 import argparse
@@ -31,7 +28,7 @@ COMMANDS = {
     "compare": "irimi.cli.runs",
     "maps": "irimi.cli.maps",
 }
-# The subcommand a command with subcommands runs when none is typed: `irimi runs` lists the runs.
+# The subcommand run when none is typed.
 DEFAULT_SUBCOMMANDS = {"runs": "list", "maps": "list"}
 # Flags irimi 0.1 spelled otherwise. They are refused like any unknown flag, with a hint.
 RENAMED_FLAGS = {
@@ -54,12 +51,11 @@ examples:
 
 
 class UsageError(Exception):
-    """A command invoked in a way its parser could not refuse by itself: `main` answers it as
-    argparse answers a bad invocation, with the command's usage and exit 2."""
+    """A bad invocation argparse could not catch; `main` prints usage and exits 2."""
 
 
 class CliError(Exception):
-    """A command that cannot go on: `main` prints `error: <message>` and exits `code`."""
+    """A command that cannot continue; `main` prints `error: <message>` and exits `code`."""
 
     def __init__(self, message: str, code: int) -> None:
         super().__init__(message)
@@ -68,23 +64,21 @@ class CliError(Exception):
 
 
 def os_error(subject: str, exc: OSError) -> str:
-    """An OS error named by what irimi was doing, `<subject>: not a directory`, rather than by
-    Python's `[Errno 20] Not a directory: '...'`. One irimi raised with a message of its own
-    already names its subject, and is said as it is."""
+    """Return `<subject>: <strerror>` for `exc`, or its own message when it has no strerror."""
     if not exc.strerror:
         return str(exc)
     return f"{subject}: {exc.strerror[:1].lower()}{exc.strerror[1:]}"
 
 
 def build_parser(command: str | None = None) -> argparse.ArgumentParser:
-    """The `irimi` parser, with every command, or with `command`'s alone when it names one."""
+    """Return the `irimi` parser, with only `command`'s subparser when it names one."""
     return _parser(command)[0]
 
 
 def _parser(
     command: str | None,
 ) -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
-    """The parser and its commands' own parsers, by name."""
+    """Return the parser and its commands' parsers by name."""
     parser = argparse.ArgumentParser(
         prog="irimi",
         allow_abbrev=False,
@@ -103,23 +97,19 @@ def _parser(
 
 
 def _command_typed(argv: list[str]) -> str | None:
-    """The command `argv` names, its first word, or None when that is an option: a root option
-    before the command (`-h`, `--version`) needs every command's parser."""
+    """Return `argv`'s first word, or None when it is an option, which needs every parser."""
     if not argv or argv[0].startswith("-"):
         return None
     return argv[0]
 
 
 def main(argv: list[str] | None = None, *, engine_factory: "EngineFactory | None" = None) -> int:
-    """The `irimi` command. A reader of its output that goes away (`irimi runs show X | head -1`,
-    or `2>&1 | head -1`, where the write that fails may be stderr's) ends it quietly with
-    `exitcodes.BROKEN_PIPE`, wherever it was writing, `--help` included. stdout and stderr
-    are flushed here, not at exit, so a reader gone by the last write is caught too, and so is a
-    warning the store's logger could not write, which the logger swallows and leaves buffered; a
-    stream closed before irimi started is None, which `print` writes nothing to.
+    """Run the `irimi` command and return its exit code.
 
-    `engine_factory` builds the engine in place of `compose.build_engine`, for the commands that
-    start a proxy (`shadow`, `serve` and `replay`): a harness's way to watch or swap the engine."""
+    A closed output pipe (`| head -1`) exits quietly with `exitcodes.BROKEN_PIPE`; both streams are
+    flushed here so that is caught before interpreter exit. `engine_factory` replaces
+    `compose.build_engine` for `shadow`, `serve` and `replay`.
+    """
     try:
         try:
             return _main(argv, engine_factory)
@@ -133,14 +123,15 @@ def main(argv: list[str] | None = None, *, engine_factory: "EngineFactory | None
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    """`argv` parsed as `irimi` parses it, for a caller that runs a command's function itself."""
+    """Return `argv` parsed as `irimi` parses it."""
     return _parse(build_parser(_command_typed(argv)), argv)
 
 
 def _parse(parser: argparse.ArgumentParser, argv: list[str]) -> argparse.Namespace:
-    """`argv` split at its first `--`: argparse parses what comes before, and what comes after is
-    the command `shadow` and `replay` run, `args.cmd`. Every other command takes nothing there.
-    An argument no parser takes is refused by the command it was typed to, with its usage."""
+    """Parse `argv` before its first `--`; what follows becomes `args.cmd` (shadow and replay).
+
+    An argument no parser takes is refused by the command it was typed to, with its usage.
+    """
     split = argv.index("--") if "--" in argv else len(argv)
     before, after = argv[:split], argv[split + 1 :]
     if before and before[0] in DEFAULT_SUBCOMMANDS:
@@ -159,8 +150,7 @@ def _parse(parser: argparse.ArgumentParser, argv: list[str]) -> argparse.Namespa
 
 
 def _hints(args: argparse.Namespace, extras: list[str]) -> list[str]:
-    """What to type instead of the unrecognized `extras`: a renamed flag's name, `irimi serve`,
-    or a command to run that was typed without its `--`."""
+    """Return what to type instead of `extras`: a renamed flag, `irimi serve`, or a `--`."""
     hints = []
     for extra in extras:
         flag = extra.partition("=")[0]
@@ -176,8 +166,7 @@ def _hints(args: argparse.Namespace, extras: list[str]) -> list[str]:
 def _innermost(
     parser: argparse.ArgumentParser, args: argparse.Namespace
 ) -> argparse.ArgumentParser:
-    """The parser of the command `args` names, a subcommand's (`irimi runs show`) included: the
-    one whose usage an error in its arguments shows."""
+    """Return the parser of the command `args` names, down to a subcommand's (`runs show`)."""
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
             chosen = action.choices.get(getattr(args, action.dest, None) or "")
@@ -206,11 +195,10 @@ def _main(argv: list[str] | None, engine_factory: "EngineFactory | None") -> int
 
 
 def _discard_unread_output() -> None:
-    """Point stdout, and stderr, at /dev/null when its reader has gone: one that still holds
-    what it could not write fails to flush, and the interpreter's flush of it at exit would raise
-    BrokenPipeError again and exit 120. A stream that flushes is still read and is left as
-    it is; one that is None (closed before irimi started) or no file (a test's) has nothing to
-    repoint."""
+    """Point each stream whose reader has gone at /dev/null.
+
+    Otherwise the interpreter's flush at exit raises BrokenPipeError again and exits 120.
+    """
     for stream in (sys.stdout, sys.stderr):
         if stream is None:
             continue

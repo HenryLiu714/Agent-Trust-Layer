@@ -1,65 +1,20 @@
 {
-  "tests/test_bounded_decoding.py": {
-    "caps_run": 4
-  },
-  "tests/test_phase3_exit.py": {
-    "caps_run": 1
-  },
-  "tests/test_phase3_replay_exit.py": {
-    "caps_run": 1
-  },
-  "tests/test_pipeline.py": {
-    "caps_run": 1
-  },
-  "tests/test_policy.py": {
-    "caps_run": 1
-  },
-  "tests/test_sdk_tool.py": {
-    "caps_run": 1
-  },
-  "tests/test_servicemap.py": {
-    "caps_run": 3
-  },
-  "tests/test_trace.py": {
-    "caps_run": 1
-  },
-  "tests/workflows/test_invariants.py": {
-    "issue_ref": 2,
-    "since_issue": 1
-  },
-  "tests/workflows/test_w01_ticket_triage.py": {
+  "tests/e2e/workflows/test_invariants.py": {
     "issue_ref": 1
   },
-  "tests/workflows/test_w02_nightly_reconcile.py": {
+  "tests/e2e/workflows/test_w02_nightly_reconcile.py": {
     "issue_ref": 1
   },
-  "tests/workflows/test_w03_queue_worker.py": {
-    "issue_ref": 4
-  },
-  "tests/workflows/test_w04_slack_ops_bot.py": {
-    "issue_ref": 2
-  },
-  "tests/workflows/test_w05_dispute_responder.py": {
-    "issue_possessive": 1,
-    "issue_ref": 2,
-    "since_issue": 1
-  },
-  "tests/workflows/test_w07_streaming_assistant.py": {
-    "issue_possessive": 2,
-    "issue_ref": 5,
-    "since_issue": 1
-  },
-  "tests/workflows/test_w08_orchestrator.py": {
-    "caps_run": 2
-  },
-  "tests/workflows/test_w09_scope_gauntlet.py": {
-    "issue_ref": 1
-  },
-  "tests/workflows/test_w10_flaky_upstream.py": {
-    "issue_possessive": 1,
+  "tests/e2e/workflows/test_w03_queue_worker.py": {
     "issue_ref": 3
   },
-  "tests/workflows/test_w11_leaky_agent.py": {
-    "phase": 2
+  "tests/e2e/workflows/test_w04_slack_ops_bot.py": {
+    "issue_ref": 1
+  },
+  "tests/e2e/workflows/test_w07_streaming_assistant.py": {
+    "issue_ref": 3
+  },
+  "tests/e2e/workflows/test_w10_flaky_upstream.py": {
+    "issue_ref": 3
   }
 }

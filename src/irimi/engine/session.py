@@ -1,19 +1,13 @@
-"""The engine-agnostic core every engine drives: what irimi does with one request, from the
-moment it is admitted to the exchange it is recorded as.
+"""The engine-agnostic core: what irimi does with one request, from admission to recording.
 
-    plan(admitted)            on a worker thread: classify, refuse a cut write, resolve the
-                              answer target once, translate a read, ask the policy, probe it
-    complete(plan, received)  when the answer arrived: observe a read, apply the overlay, add a
-                              faked write to the run's write log, build the exchange
-    fail(plan, received)      when the connection failed before an answer arrived
-    refuse(refusal)           a request irimi answers with its own error before any decision
+    plan(admitted)            worker thread: classify, translate a read, ask the policy
+    complete(plan, received)  answer arrived: observe a read, overlay, log a faked write
+    fail(plan, received)      the connection failed before an answer arrived
+    refuse(refusal)           irimi's own error for a request it will not answer
     settle(plan)              the exchange a plan irimi answered in full is recorded as
     record(exchange)          the store, then the engine's callback
 
-A `Plan` is complete before the engine touches its flow, and nothing here touches one: an engine
-turns flows into `Request`s and `Response`s, carries a plan onto its flow, and calls back here.
-`plan` never raises; a decision that raised, a write whose body irimi could not read whole and a
-target irimi will not dial each become a plan irimi answers with its own 502.
+Nothing here touches a flow; the engine carries a finished `Plan` onto it.
 """
 
 import logging
@@ -49,26 +43,22 @@ from irimi.servicemaps.classify import Classification, classify, unclassified
 
 logger = logging.getLogger(__name__)
 
-# How long the probe below waits for a target to accept a connection. It runs on the decision's
-# worker thread, so a slow target stalls only the request that names it.
+# The probe runs on the decision's worker thread, so a slow target stalls only its own request.
 TARGET_PROBE_TIMEOUT_S = 2.0
 
 
 class RequestBodyCut(Exception):
-    """A write whose body decoded past MAX_DECODED_BODY, which `plan` refuses to answer."""
+    """A write whose body decoded past MAX_DECODED_BODY, which `plan` refuses."""
 
 
 @dataclass(frozen=True)
 class Plan:
-    """Everything irimi decided about one request, before the engine acts on it.
+    """How irimi will answer one request, before the engine acts on it.
 
-    `request` is the request as the trace shows it: rewritten, if the overlay translated a
-    cursor, whoever answers it. `flags` are the decision's own and the cut request's. `issued` are
-    the reads the decision made on its own account, which the engine records after the answer.
-    `target` is the answer target's address, for a delegated request and one whose target failed.
-
-    `settled` is a plan irimi answered in full with its own error: the engine sends its response
-    and records it at once (`settle`), and no later hook has anything to add."""
+    `request` is as the trace shows it, including any overlay translation. `issued` are irimi's
+    own reads, recorded after the answer. `target` is the target URL, if any. `settled` means
+    irimi answered in full with its own error, so no later hook has anything to add.
+    """
 
     request: Request
     classification: Classification
@@ -88,10 +78,7 @@ class Plan:
 
 @dataclass(frozen=True)
 class Received:
-    """The answer a planned request got, as the trace records it.
-
-    `streamed` says its headers and chunks went to the agent as they arrived, so nothing may be
-    written back. `cut` is the flag saying the recorded body is not all of it, or None."""
+    """The answer a planned request got; `streamed` means it already went to the agent."""
 
     response: Response | None
     streamed: bool = False
@@ -101,23 +88,19 @@ class Received:
 
 @dataclass(frozen=True)
 class Completed:
-    """A completed request: its exchange, and the response the engine sends instead of the one it
-    received, or None to leave the received one exactly as it is."""
+    """A completed exchange, and the response to send instead, or None to send it unchanged."""
 
     exchange: Exchange
     send: Response | None = None
 
 
 def _cut_flags(cut: bool) -> tuple[Flag, ...]:
-    """`body-truncated` for a request whose body decoded only up to the cap, so the exchange it
-    becomes says its recorded request is not all of it."""
+    """Return `body-truncated` for a request whose body was cut at the cap."""
     return (Flag.BODY_TRUNCATED,) if cut else ()
 
 
 class ShadowSession:
-    """One engine's requests: the policy that decides them, the overlay, the per-run write log
-    and the store they are recorded in. `run_id` is the run a request that names none belongs
-    to."""
+    """One engine's policy, overlay, per-run write log and store; `run_id` is the default run."""
 
     def __init__(
         self,
@@ -135,24 +118,22 @@ class ShadowSession:
         self.maps = maps
         self.run_id = run_id
         self.on_exchange = on_exchange
-        # Given by the composition root, which ends its runs as the store reports them ended.
+        # The composition root ends its runs as the store reports them ended.
         self.write_log = write_log if write_log is not None else WriteLog()
 
     # ------------------------------------------------------------------------------ deciding
 
     def plan(self, admitted: Admitted) -> Plan:
-        """The whole decision, with no flow in sight. Never raises: mitmproxy forwards a flow
-        untouched when a hook raises, so a raise here would send the agent's request - a write
-        included - to the real service. Any exception is a plan irimi answers with its own 502."""
+        """Return how to answer `admitted`, without touching a flow.
+
+        Never raises (fail-closed hook rule): any exception becomes irimi's 502 flagged
+        `decision-failed`.
+        """
         request = admitted.request
         try:
             cls = classify(request, self.maps)
-            # irimi never answers a write from part of its body. A body that decodes past
-            # MAX_DECODED_BODY reaches the decision empty, as it is recorded, and a fake built from
-            # that would tell the agent a write it never sent succeeded. So the write fails
-            # closed, a delegated one too, because irimi cannot record what it was. Classifying
-            # reads no body, so the kind is still the agent's; a live kind is forwarded with the
-            # agent's own bytes, which no hook edits.
+            # A body cut at the cap reaches the decision empty, and a faked write built from it
+            # would confirm a write the agent never sent. Live kinds forward the agent's own bytes.
             if admitted.cut and cls.kind not in LIVE_KINDS:
                 cut = RequestBodyCut(
                     "request body decompresses to more than "
@@ -162,10 +143,8 @@ class ShadowSession:
                 return self.decision_failed(admitted, cut, classification=cls)
             target = targets.delegate(request, cls)
             writes = self.write_log.for_run(admitted.run_id)
-            # A read is recorded as irimi would ask it, whoever answers it. It is translated
-            # before the policy decides, so the policy, the trace and a later replay of that trace
-            # all see the one request; only a live forward carries the translation onto the wire.
-            # A delegated read is never translated: its target owns that service's state.
+            # Translated before the policy sees it, so policy, trace and replay share one request.
+            # A read sent to a target is never translated: the target owns that service's state.
             translation = None
             if cls.kind == "read" and writes and target is None:
                 translation = self._translate(writes, cls, request)
@@ -190,7 +169,6 @@ class ShadowSession:
         elif isinstance(decision, Delegate):
             target = decision.target.url
         else:
-            # Stamped here, so the response the engine sends already says who answered it.
             decision = replace(
                 decision, response=wire.stamp(decision.response, decision.answered_by)
             )
@@ -214,14 +192,10 @@ class ShadowSession:
     def _translate(
         self, writes: tuple[Exchange, ...], cls: Classification, request: Request
     ) -> Translation | None:
-        """Let the overlay translate a read before the policy decides about it. None when nothing
-        changed.
+        """Return the overlay's translation of a read, or None when nothing changed.
 
-        Guarded on its own inside `plan`'s guard, because the two failures want opposite answers:
-        a decision that raises is answered with a 502, since the thing it could not decide about
-        may be a write, while a translation that fails forwards the read unchanged - nothing is
-        performed by letting a read through, and 502-ing it would break a run over a cosmetic
-        translation.
+        A failed translation forwards the read unchanged rather than 502-ing it: a read changes
+        nothing on the service.
         """
         try:
             return self.overlay.rewrite(writes, cls, request)
@@ -240,13 +214,11 @@ class ShadowSession:
         classification: Classification | None = None,
         issued: tuple[Exchange, ...] = (),
     ) -> Plan:
-        """irimi's 502 for a request it will not answer as decided, flagged `decision-failed`. A
-        body cut at the cap keeps the classification it was refused under; a decision that raised
-        is recorded unclassified."""
+        """Return irimi's 502 flagged `decision-failed`, unclassified unless told otherwise."""
         if isinstance(cause, RequestBodyCut):  # the agent's body, not irimi's failure
             logger.warning("irimi: refused write: %s", cause)
         else:
-            logger.error("irimi: answering locally; the decision raised", exc_info=cause)
+            logger.error("irimi: the decision raised; answering with irimi's 502", exc_info=cause)
         request = request if request is not None else admitted.request
         return self._irimi_error(
             request,
@@ -262,9 +234,7 @@ class ShadowSession:
         )
 
     def target_failed(self, plan: Plan, message: str) -> Plan:
-        """irimi's 502 for a request whose answer target it refused or could not reach. Never a
-        silent fall back to the fake, which would hide a broken setup and look like a working
-        shadow run: `target-failed` says why."""
+        """Return irimi's 502 flagged `target-failed`; never fall back to the fake and hide it."""
         logger.warning("irimi: %s", message)
         return self._irimi_error(
             plan.request,
@@ -281,10 +251,10 @@ class ShadowSession:
         )
 
     def refuse(self, refusal: Refusal) -> Plan:
-        """irimi's answer to a request it will not decide about, flagged `refused` and recorded
-        under the run it names. A parsed request keeps its usual classification, so a refused GET
-        is not counted as a write; one irimi could not parse is recorded unclassified. Nothing of
-        it is forwarded, so only the recorded request loses irimi's own headers."""
+        """Return irimi's error flagged `refused`, recorded under the run the request names.
+
+        A parsed request keeps its classification, so a refused GET is not counted as a write.
+        """
         request, run_id = refusal.request, self.run_id
         try:
             run_id, request = ingress.attributed(request, run_id)
@@ -323,8 +293,7 @@ class ShadowSession:
         target: str = "",
         issued: tuple[Exchange, ...] = (),
     ) -> Plan:
-        """A settled plan answered with irimi's own JSON error, stamped `irimi`: the one path for
-        every error irimi answers with itself."""
+        """Return a settled plan answered with irimi's JSON error, stamped `irimi`."""
         response = wire.irimi_error(status, error_type, message)
         return Plan(
             request,
@@ -342,9 +311,10 @@ class ShadowSession:
     # ------------------------------------------------------------------------------ recording
 
     def settle(self, plan: Plan) -> Exchange:
-        """The exchange a settled plan is recorded as, ending now. The response is irimi's error
-        without its stamp: the stamp is on the wire only. An answer to HEAD is recorded with no
-        content, as it is sent."""
+        """Return a settled plan's exchange; the stamp is on the wire only, not recorded.
+
+        An answer to HEAD is recorded with no content, as it is sent.
+        """
         assert isinstance(plan.decision, Respond)
         response = plan.decision.response.without_header(ANSWERED_BY_HEADER)
         if plan.request.method == "HEAD":
@@ -352,28 +322,21 @@ class ShadowSession:
         return self._exchange(plan, response, plan.answered_by, plan.flags)
 
     def complete(self, plan: Plan, received: Received) -> Completed:
-        """The exchange a planned request became once its answer arrived, and what to send
-        instead of that answer.
+        """Return the exchange a planned request became, and what to send instead of its answer.
 
-        A streamed response is already on its way out: its headers went before this was called
-        and its body is never assembled. So the overlay is not asked, since whatever it returned
-        could not reach the agent, and nothing is sent back. A body that decodes past the cap is
-        recorded empty, never as the document, so no read observer reads it and nothing the
-        overlay returns is sent: the agent gets the service's bytes, and only the recording is
-        short.
+        A streamed response is already sent, so it is not overlaid. A body cut at the cap is not
+        observed or overlaid: the agent gets the service's bytes and only the recording is short.
         """
         upstream = received.response
         assert upstream is not None
         flags = plan.flags
         if received.cut is not None and received.cut not in flags:
-            # Once, though the request may have been cut too: a flag is a fact, not a count.
             flags += (received.cut,)
         cut = received.cut is not None
         cls = plan.classification
         decision = plan.decision
-        # A read irimi forwarded is the only place the real values a later fake has to sort
-        # against appear, so every read's body goes past the policy's `observe_read`. A
-        # delegated read is observed too: its target's values are then the ones the agent sees.
+        # Later faked writes sort after the real values seen here; a target's read counts too,
+        # since its values are what the agent sees.
         if not received.streamed and not cut and cls.kind == "read":
             self._observe_read(cls.service, upstream.body)
         answered_by = plan.answered_by
@@ -381,32 +344,25 @@ class ShadowSession:
         overlay: OverlayCoverage | None = None
         send: Response | None = None
         if isinstance(decision, Respond):
-            # The answer irimi planned, as the engine read it back: stamped when it was planned,
-            # recorded without the stamp. A read a replay answered from the recording carries
-            # the recorded read's fidelity, the overlay's work in the run it replays.
+            # Recorded without the stamp. A replayed read keeps the recorded read's fidelity.
             response = upstream.without_header(ANSWERED_BY_HEADER)
             overlay = decision.overlay
         elif isinstance(decision, Forward):
-            # The overlay stays off a delegated read: the target owns that service's state. And
-            # it is asked only once there is a write to show, as the translation is.
+            # A target's read is not a Forward, so the overlay never touches it.
             if not received.streamed and cls.kind == "read" and self.write_log.for_run(plan.run_id):
                 overlaid = self._overlaid(plan, decision, upstream)
                 if cut:
-                    # A read cut at the cap is never overlaid, and says what it could not show:
-                    # `partial` when the run has a write it would have shown in this read.
+                    # `partial` when the run has a write this read would have shown.
                     overlay = None if overlaid.fidelity is None else "partial"
                 else:
                     response, overlay = overlaid.response, overlaid.fidelity
                 if response is not upstream:
-                    # The bytes are no longer the service's, so the answer has to say whose they
-                    # are: a changed body with no header says "the real service sent this".
+                    # The bytes are no longer the service's, so the answer must carry a header.
                     answered_by = "overlay"
         exchange = self._exchange(
             plan, response, answered_by, flags, overlay, received.stream_chunks
         )
-        # The write log is what the overlay applies to live reads. `is_authored_write` is the one
-        # statement of what may enter it, because the summary files a read under a write by the
-        # same rule.
+        # The summary files reads under writes by the same `is_authored_write` rule.
         if is_authored_write(exchange):
             self.write_log.add(exchange)
         if not received.streamed and not isinstance(decision, Respond):
@@ -416,15 +372,10 @@ class ShadowSession:
         return Completed(exchange, send)
 
     def fail(self, plan: Plan, received: Received | None) -> Exchange:
-        """The exchange a planned request became when its connection failed before an answer
-        arrived. `received` is what of a streamed answer reached the agent, or None.
+        """Return the exchange for a connection that failed before an answer arrived.
 
-        What failed depends on who was going to answer. A live forward lost the real service; a
-        delegated one could not reach its target, which must be said out loud rather than fall
-        back to the fake. A request irimi answered itself never opened a connection at all, so
-        the failure is the client going away, and the answer keeps only the flags it carried.
-        The answer's own flags are kept on every path: a replay's miss forwarded live says
-        `replay-miss` whether its upstream then answered or failed.
+        `received` is what of a streamed answer reached the agent, or None. A live forward is
+        flagged `upstream-error`, a target `target-failed`; the plan's own flags are always kept.
         """
         flags = plan.flags
         if plan.answered_by == "live":
@@ -434,8 +385,6 @@ class ShadowSession:
         response: Response | None = None
         stream_chunks: tuple[int, ...] = ()
         if received is not None:
-            # A stream that ended in an error had its headers and some chunks reach the agent
-            # already: the recording keeps what was copied and says it is not the whole stream.
             response, stream_chunks = received.response, received.stream_chunks
             flags += (Flag.STREAM_TRUNCATED,)
         overlay = plan.decision.overlay if isinstance(plan.decision, Respond) else None
@@ -444,10 +393,7 @@ class ShadowSession:
     def record(self, exchange: Exchange) -> None:
         """Store the exchange, then hand it to the engine's callback.
 
-        A recording failure never affects traffic. `RunStore.record` may not raise, and this
-        guards the call anyway: a store swapped in later does not inherit `DirectoryStore`'s
-        care. It logs the exception's type only, as the store logs its own failures: a broken
-        store fails on every exchange, and a message may quote the value it choked on.
+        A store failure is logged by type only: its message may quote an unredacted value.
         """
         try:
             self.store.record(exchange)
@@ -468,7 +414,7 @@ class ShadowSession:
         overlay: OverlayCoverage | None = None,
         stream_chunks: tuple[int, ...] = (),
     ) -> Exchange:
-        """The exchange a plan became, ending now, carrying what the decision said of a write."""
+        """Return the exchange a plan became, ending now."""
         decision, cls = plan.decision, plan.classification
         outcome = WriteOutcome()
         if isinstance(decision, Respond):
@@ -497,17 +443,14 @@ class ShadowSession:
     # ---------------------------------------------------------------------------- the guards
 
     def _observe_read(self, service: str, body: bytes) -> None:
-        """Hand a forwarded read to the policy, whose fakes sort after what it saw. Never
-        raises: an observer swapped in later does not inherit the policy's care."""
+        """Hand a read to the policy, whose faked writes sort after it. Never raises."""
         try:
             self.policy.observe_read(service, body)
         except Exception:
             logger.exception("irimi: the policy could not observe a read")
 
     def _overlaid(self, plan: Plan, decision: Forward, upstream: Response) -> Overlaid:
-        """The overlay's answer for one live read, over its own run's writes, or the upstream one
-        if it failed. Guarded here as `ServiceOverlay` guards itself: an overlay swapped in later
-        - a test double, a replay overlay - does not inherit its care."""
+        """Return the overlay's answer for a live read, or the upstream one if it raised."""
         try:
             writes = self.write_log.for_run(plan.run_id)
             removed = decision.translation.removed if decision.translation is not None else None
@@ -518,33 +461,31 @@ class ShadowSession:
 
 
 def _probe_target(target: Target) -> None:
-    """Raise TargetUnreachable when nothing accepts a connection at an answer target.
+    """Raise TargetUnreachable when nothing accepts a connection at a target.
 
-    The engine lets its proxy dial the target, which keeps a streamed target response streaming.
-    When that dial fails, mitmproxy answers with its own HTML page, which names neither irimi nor
-    the target. So the dial is tried here first, and a target that cannot be reached gets irimi's
-    JSON 502 instead. Best-effort: a target that dies between the probe and the dial still gets
-    mitmproxy's page.
+    A failed dial by the proxy yields mitmproxy's HTML page instead of irimi's JSON 502, so dial
+    first. Best-effort: a target that dies between probe and dial still gets mitmproxy's page.
     """
     try:
         socket.create_connection((target.host, target.port), TARGET_PROBE_TIMEOUT_S).close()
     except OSError as exc:
         raise targets.TargetUnreachable(
-            f"answer target {target.url!r} could not be reached: {exc}"
+            f"target {target.url!r} could not be reached: {exc}"
         ) from None
 
 
 def _target_refusal(
     forward: targets.ForwardTo, listener: tuple[str, int]
 ) -> targets.TargetRefused | None:
-    """Why irimi will not send this request to its answer target, or None when it may: the target
-    is irimi's own listener, which would make the engine dial itself in a loop, or it cannot be
-    reached. On the decision's worker thread, so the probe never blocks the event loop."""
+    """Return why the request may not go to its target (irimi itself, unreachable), or None.
+
+    Runs on the worker thread, so the probe never blocks the event loop.
+    """
     try:
         targets.refuse_self_target(forward.target, listener[1], listener[0])
         _probe_target(forward.target)
     except targets.TargetRefused as exc:
         return exc
     except Exception as exc:
-        return targets.TargetRefused(f"answer target {forward.url!r} could not be applied: {exc}")
+        return targets.TargetRefused(f"target {forward.url!r} could not be applied: {exc}")
     return None

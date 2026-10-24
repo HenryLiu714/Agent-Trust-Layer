@@ -1,11 +1,6 @@
-"""The SDK under `irimi replay`: a top-level run adopts the replay's run and posts nothing, a
-trigger is called again from its entrypoint and captured args, and `testing.replay`'s result codec.
+"""The SDK's parts of `irimi replay`: run adoption, re-calling a trigger, and the replay child.
 
-`tests/cli/test_replay.py` drives all of it through the real command; these are its parts, each
-alone: `RunScope`'s adopting branch against a reporter that writes down every post,
-`calls.call_arguments` and `entrypoints.resolve`, `irimi.replay.child` as the subprocess it
-is, and `ReplayResult`'s JSON.
-"""
+`tests/cli/test_replay.py` drives them together through the real command."""
 
 import asyncio
 import json
@@ -63,8 +58,7 @@ class _Posts:
 
 @pytest.fixture
 def posts(monkeypatch) -> _Posts:
-    """The test process as `irimi replay` sets up its child: active, and told the run it replays
-    as."""
+    """Set this process up as `irimi replay` sets up its child: active, with the run to adopt."""
     reporter = _Posts()
     monkeypatch.setattr(state, "reporter", reporter)
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
@@ -129,8 +123,7 @@ def test_an_async_trigger_and_a_handed_off_coroutine_adopt_it_too(posts, instrum
 
 
 def test_the_adopted_run_is_current_when_it_is_instrumented(posts, monkeypatch):
-    """The patch reads the current run as each request is sent, so the run is current before
-    `instrument()` runs, and so before the run's first request."""
+    """The adopted run is current before `instrument()`, so before the run's first request."""
     seen: list[str | None] = []
     monkeypatch.setattr(runs, "instrument", lambda: seen.append(sdk.current_run_id()))
     handle("T1")
@@ -140,8 +133,7 @@ def test_the_adopted_run_is_current_when_it_is_instrumented(posts, monkeypatch):
 
 @sdk.trigger
 def hands_to_workers(ticket: str) -> list[str | None]:
-    """The run's id as a thread handed the run (`sdk.propagate`), an asyncio task, and a thread
-    that was not handed it but calls a trigger of its own see it."""
+    """Return the run id seen by a propagated thread, a task, and a thread calling a trigger."""
     seen: list[str | None] = []
     for target in (
         sdk.propagate(lambda: seen.append(sdk.current_run_id())),
@@ -207,8 +199,7 @@ def test_outside_a_replay_a_trigger_starts_its_own_run(posts, instrumented, monk
 
 
 def test_a_replay_id_irimi_did_not_set_adopts_nothing(posts, instrumented, monkeypatch):
-    """A stale `IRIMI_REPLAY_RUN` left in a serve agent's environment, which names no `IRIMI_RUN`,
-    or another, is not irimi's word: the trigger starts its own run, as it would."""
+    """A stale `IRIMI_REPLAY_RUN` not matching `IRIMI_RUN` is ignored: the trigger runs its own."""
     for run_env in (None, "another0another0"):
         if run_env is None:
             monkeypatch.delenv(RUN_ENV)
@@ -258,8 +249,7 @@ def _p(a, /, **kw):
     ],
 )
 def test_call_arguments_undoes_capture_call_s_binding(fn, args, kwargs):
-    """A parameter left to its default stays so, `*args` spread back out, `**kwargs` back in, and
-    a positional-only parameter in its place: the call the run recorded, made again."""
+    """`call_arguments` remakes the call: defaults, `*args`, `**kwargs`, positional-only."""
     captured, replayable = capture.capture_call(fn, args, kwargs)
     assert replayable
     again, named = calls.call_arguments(fn, capture.revive(captured))
@@ -280,10 +270,10 @@ def _r(a, b=2, *rest):
     ],
 )
 def test_call_arguments_refuses_args_that_would_bind_otherwise_than_they_say(fn, arguments, error):
-    """Args given by hand (`--args`) can say what no call binds: `*args` with a positional
-    parameter before it left out, which would fill that parameter instead; a `*args` that is no
-    list or a `**kwargs` that is no object, which would be spread as characters or keys; and a
-    `**kwargs` naming a parameter, which would replace that parameter's value."""
+    """Hand-written `--args` that no call could bind are refused.
+
+    That is `*args` with an earlier positional left out, a `*args` that is no list, a `**kwargs`
+    that is no object, and a `**kwargs` naming a parameter."""
     with pytest.raises(TypeError) as raised:
         calls.call_arguments(fn, arguments)
     assert str(raised.value) == error
@@ -317,8 +307,7 @@ def plain_cls(cls: str, ticket: str) -> tuple[str, str]:
 
 @pytest.mark.parametrize("fn", [Desk.static_self, plain_cls])
 def test_a_trigger_receiving_no_instance_is_called_again_with_its_first_parameter(fn):
-    """A static method's or a plain function's first parameter is an argument, even named `self`
-    or `cls`: captured, it calls the trigger again."""
+    """A plain function's first parameter, even named `self` or `cls`, is passed again."""
     captured, replayable = capture.capture_call(fn.__wrapped__, ("desk", "T1"), {})
     assert replayable
     trigger = entrypoints.resolve(entrypoints.entrypoint(fn))
@@ -414,8 +403,7 @@ async def adopted(ticket):
 def _child(
     tmp_path, entrypoint: str, args: dict, env: dict[str, str] | None = None
 ) -> tuple[subprocess.CompletedProcess[str], Any]:
-    """`replay_child` run as `irimi replay` runs it, with `env` besides: what it did, and the
-    outcome it wrote."""
+    """Run the replay child as `irimi replay` does, plus `env`; return what it did and wrote."""
     (tmp_path / "child_agent.py").write_text(CHILD_MODULE)
     (tmp_path / "interrupted_agent.py").write_text("raise KeyboardInterrupt\n")
     args_file, outcome_file = tmp_path / "args.json", tmp_path / "outcome.json"
@@ -464,9 +452,7 @@ def test_the_child_runs_a_coroutine_to_its_end(tmp_path):
 def test_the_child_s_trigger_adopts_the_replay_s_run_and_its_handed_off_coroutine_runs(
     tmp_path, entrypoint, printed
 ):
-    """A sync trigger that returns a coroutine hands its run to it: the child runs that
-    coroutine to its end, in the replay's run, as it runs an `async def` trigger's. Nothing
-    is posted, so no control endpoint is needed."""
+    """The child runs a coroutine a sync trigger returns to its end, in the replay's run."""
     replaying = {ENGINE_ACTIVE_ENV: "1", RUN_ENV: REPLAY, REPLAY_RUN_ENV: REPLAY}
     done, outcome = _child(tmp_path, entrypoint, TICKET, replaying)
     assert (done.returncode, done.stdout, done.stderr) == (0, printed, "")
@@ -474,8 +460,7 @@ def test_the_child_s_trigger_adopts_the_replay_s_run_and_its_handed_off_coroutin
 
 
 def test_a_trigger_that_raises_exits_1_with_its_traceback_and_says_what_it_raised(tmp_path):
-    """The outcome is what a run records an exception as (`_errors.error_info`), so the replay's
-    run ends on `builtins.KeyError` as its recording's did."""
+    """The outcome records the exception as a run does: the replay ends on `builtins.KeyError`."""
     done, outcome = _child(tmp_path, "child_agent:fails", TICKET)
     assert done.returncode == 1
     assert done.stderr.startswith("Traceback (most recent call last):")
@@ -513,8 +498,7 @@ def test_a_trigger_that_raises_exits_1_with_its_traceback_and_says_what_it_raise
 def test_a_call_the_child_cannot_make_exits_cannot_call_and_says_why(
     tmp_path, entrypoint, args, error
 ):
-    """Never an agent that ran and raised: the child exits `CANNOT_CALL`, with one `error:` line,
-    and its outcome says it never called."""
+    """The child exits `CANNOT_CALL` with one `error:` line; its outcome says it never called."""
     from irimi.replay.child import CANNOT_CALL
 
     done, outcome = _child(tmp_path, entrypoint, args)
@@ -535,8 +519,7 @@ def test_a_call_the_child_cannot_make_exits_cannot_call_and_says_why(
 def test_a_call_ended_by_an_interrupt_or_an_exit_says_so_and_ends_the_child_as_it_would(
     tmp_path, entrypoint, code, error
 ):
-    """What a run records them as, and then the process ends as they would have ended it, never
-    as a trigger that raised."""
+    """An interrupt or exit is recorded as a run records it, then ends the child as it would."""
     done, outcome = _child(tmp_path, entrypoint, TICKET)
     assert done.returncode == code
     assert outcome == CallResult(True, error)
@@ -545,8 +528,7 @@ def test_a_call_ended_by_an_interrupt_or_an_exit_says_so_and_ends_the_child_as_i
 def test_a_child_interrupted_before_its_call_says_it_never_called_and_stops_as_interrupted(
     tmp_path,
 ):
-    """Whatever ends the child before the call, a KeyboardInterrupt as its module loads too, is a
-    call never made, never an agent that ran; the interruption then ends the process."""
+    """An interrupt before the call, even while the module loads, is recorded as never called."""
     done, outcome = _child(tmp_path, "interrupted_agent:main", {})
     assert done.returncode == -signal.SIGINT
     error = "KeyboardInterrupt before the call"
@@ -673,8 +655,7 @@ def test_sdk_replay_refuses_arguments_each_of_which_fits_but_not_together():
 
 
 def _answering(argv: list[str], seen: dict[str, Any]) -> int:
-    """A stand-in for `irimi`, through `testing.replay`'s one seam: writes down what it was given
-    and how the directory holding its files was, and writes a result."""
+    """Fake `irimi` at `testing.replay`'s seam: note argv and its directory, write a result."""
     tmp = os.path.dirname(argv[argv.index("--result-file") + 1])
     seen["argv"], seen["tmp"] = argv, tmp
     seen["mode"] = stat.S_IMODE(os.stat(tmp).st_mode)
@@ -688,9 +669,10 @@ def _answering(argv: list[str], seen: dict[str, Any]) -> int:
 
 
 def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatch):
-    """The args in a file in a directory only this user can enter, never on the command line;
-    the run id as `--run=`, so one starting with `-` is no flag; this process's `sys.path` as the
-    child's; and the directory gone when `testing.replay` returns, raises, or finds no result."""
+    """`testing.replay` passes args in a private directory it removes whatever happens.
+
+    The run id goes as `--run=`, so one starting with `-` is no flag, and the child gets this
+    process's `sys.path`."""
     seen: dict[str, Any] = {}
 
     def run_irimi(argv: list[str], env: Any) -> int:
@@ -739,8 +721,7 @@ def test_sdk_replay_passes_its_call_in_a_private_directory_it_removes(monkeypatc
 
 
 def test_a_replay_s_child_is_told_which_trigger_to_call_and_no_other_child_is(tmp_path):
-    """`runner.child_env(..., call=)` names the trigger and its args file for `replay_child`, and
-    drops both from every other child, as `IRIMI_REPLAY_RUN` is dropped."""
+    """`child_env(..., call=)` names the trigger for the replay child, and for no other."""
     from irimi.cli import runner
 
     stale = {

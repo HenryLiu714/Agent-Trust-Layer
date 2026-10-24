@@ -1,5 +1,4 @@
-"""`sdk._capture`: how a trigger's arguments are written down, one test per row of its
-table, and `revive`, which builds them again for a replay."""
+"""`sdk._capture`: one test per row of its table of argument captures, and `revive` for replay."""
 
 import dataclasses
 import enum
@@ -121,9 +120,9 @@ def test_anything_else_is_its_repr_and_not_replayable(value):
 
 
 def test_a_repr_is_cut_to_1000_characters_outside_secrets():
-    """Cut before the store redacts it, so never inside a key, which redaction would no longer
-    find: a key across the cut is left out whole, and a repr with none across it keeps
-    1000 characters, one long word included."""
+    """A repr is cut before redaction, so never inside a key: a key across the cut is left out.
+
+    A repr with no key across the cut keeps 1000 characters, one long word included."""
 
     class Long:
         def __init__(self, text: str) -> None:
@@ -251,9 +250,9 @@ class _Statics:
 
 
 def test_capture_call_keeps_a_first_parameter_named_self_or_cls_that_receives_nothing():
-    """A function outside a class body, or a static method in one, receives no instance: its
-    first parameter is an argument whatever its name, and leaving it out made its run one replay
-    could not call again."""
+    """A plain function's or static method's first parameter is an argument, whatever its name.
+
+    Leaving it out would make the run one replay cannot call again."""
 
     def inner(cls: int, x: int) -> None: ...
 
@@ -388,8 +387,7 @@ def test_revive_names_why_a_value_cannot_be_rebuilt(value, said):
 
 
 def test_revive_never_imports_a_module_a_stored_run_names(monkeypatch):
-    """Importing runs a module's code, and a stored run is data: a class is found only in a module
-    this process already holds."""
+    """revive finds a class only in a module already imported: a stored run is data, not code."""
     monkeypatch.delitem(sys.modules, "json.tool", raising=False)
     with pytest.raises(capture.NotReplayable, match="has not imported"):
         capture.revive({"__irimi_type__": "json.tool:main", "value": {}})
@@ -397,8 +395,7 @@ def test_revive_never_imports_a_module_a_stored_run_names(monkeypatch):
 
 
 def test_revive_never_asks_a_module_s_getattr(monkeypatch):
-    """A lazy package's PEP 562 `__getattr__` imports on first use: revive looks a class up in what
-    the module already holds, so a stored run's name cannot make it import after all."""
+    """revive looks only in a module's own namespace, so a lazy `__getattr__` cannot import."""
     asked: list[str] = []
     lazy = types.ModuleType("lazy_pkg")
 

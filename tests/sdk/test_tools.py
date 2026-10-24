@@ -1,12 +1,6 @@
-"""`@sdk.read_tool` and `@sdk.write_tool`: the tool calls the proxy cannot see, against a real
-engine and store.
+"""`@sdk.read_tool` and `@sdk.write_tool` against a real engine and store, read back off disk.
 
-Each recorded call is posted over a socket to the engine's control endpoint and read back
-off disk with `StoreReader` once the engine has stopped. A write tool's real function raises
-`RealWriteRan` wherever a test says it must not run, so a test that let it run fails on it rather
-than on a missing record. The last test runs the real `irimi shadow` over a child that makes one
-Stripe write through the proxy and calls one write tool.
-"""
+A write tool's real function raises `RealWriteRan` wherever a test says it must not run."""
 
 import asyncio
 import functools
@@ -98,7 +92,7 @@ def no_warning_yet(monkeypatch) -> None:
     monkeypatch.setattr(state, "warned", set())
 
 
-# -- decoration time: THE SCOPE RULE's shape, applied to the SDK -----------------------------------
+# -- decoration time: the scope rule's shape, applied to the SDK -----------------------------------
 
 
 def _sync(order: int) -> int:
@@ -190,7 +184,7 @@ def test_a_tool_keeps_its_functions_name_signature_and_nature():
     assert not inspect.iscoroutinefunction(mark_refunded)
 
 
-# -- active: a write runs only its stand-in, a read runs for real, and both are recorded -----------
+# -- active: a write runs only its fake, a read runs for real, and both are recorded ---------------
 
 
 def test_an_active_write_runs_only_its_stand_in_and_is_stored_in_its_run(irimi):
@@ -266,8 +260,7 @@ def test_a_stand_in_that_raises_re_raises_the_same_object_and_records_its_error(
 def test_a_tool_called_under_irimi_shadow_with_no_trigger_lands_in_the_process_run(
     irimi, monkeypatch
 ):
-    """`irimi shadow` names its process run in `IRIMI_RUN`; a call made in no SDK run is the
-    process's, which may hold tool calls though not an SDK start or end."""
+    """Under `irimi shadow` a tool call made in no SDK run lands in the process run."""
     monkeypatch.setenv(RUN_ENV, ENGINE_RUN)
     assert mark_refunded(9) == {"stood_in": 9, "note": ""}
     reader = irimi.finish()
@@ -277,8 +270,7 @@ def test_a_tool_called_under_irimi_shadow_with_no_trigger_lands_in_the_process_r
 
 
 def test_a_tool_called_in_no_run_with_no_process_run_is_stored_unattributed(irimi, monkeypatch):
-    """`irimi serve` gives no `IRIMI_RUN`: a call outside every run is filed under none, as an
-    exchange that names none is, and the control endpoint takes it there."""
+    """Under `irimi serve`, which sets no `IRIMI_RUN`, a call in no run is stored unattributed."""
     monkeypatch.delenv(RUN_ENV, raising=False)
     assert look_up(4) == {"order": 4, "status": "paid"}
     reader = irimi.finish()
@@ -301,8 +293,9 @@ def test_a_tool_call_is_posted_to_its_runs_route_with_no_run_id_in_the_body(post
 
 
 def test_the_args_are_bound_against_the_real_function_not_the_stand_in(posted):
-    """The agent called the real function, so its parameter names are what a replay binds
-    against; a stand-in that takes anything would record `{"args": [...], "kwargs": {...}}`."""
+    """Args are bound by the real function's parameter names, which a replay binds against.
+
+    A fake that takes anything would otherwise record `{"args": [...], "kwargs": {...}}`."""
 
     def anything(*args: Any, **kwargs: Any) -> str:
         return "stood in"
@@ -331,9 +324,9 @@ def test_the_args_are_captured_before_the_body_runs(posted):
 
 
 def test_args_and_result_together_stay_inside_one_capture_budget(posted):
-    """Each is bounded alone (`limits.MAX_CAPTURED_BYTES`); the post must stay under the
-    control endpoint's 2 MiB, so a result that would take the pair past one budget is replaced by
-    the truncation marker, and the call is still recorded."""
+    """A result that takes args and result past one capture budget becomes the truncation marker.
+
+    The post must stay under the control endpoint's 2 MiB; the call is still recorded."""
     half = "x" * (limits.MAX_CAPTURED_BYTES // 2 + 10)
 
     @sdk.read_tool(name="db.echo")
@@ -466,15 +459,14 @@ def test_an_async_tool_closed_mid_call_records_the_close_and_raises_nothing(post
         raise RealWriteRan("the real write ran")
 
     coroutine = write(1)
-    coroutine.send(None)  # to its first suspension: the stand-in is waiting
+    coroutine.send(None)  # to its first suspension: the fake is waiting
     coroutine.close()
     [(_, _, doc)] = posted.posts
     assert doc["error"]["type"] == "builtins.GeneratorExit"
 
 
 def test_an_async_tools_result_is_captured_on_the_callers_thread_as_it_was_returned(posted):
-    """Only the post waits off the event loop: the result's `repr` runs where the tool returned,
-    before any other task can change what it returned."""
+    """An async tool's result is captured where it returned, before another task can change it."""
     shared = {"status": "as returned"}
     seen: list[str] = []
 
@@ -513,9 +505,7 @@ def test_a_record_that_cannot_be_built_costs_the_agent_nothing(posted, monkeypat
 
 
 def test_a_stand_in_that_is_the_function_itself_is_refused_when_the_agent_loads(posted):
-    """`fake=` names what runs IN PLACE of the write. Naming the write itself - reading `fake`
-    as "the function to fake" - would run the real write under irimi, so it is refused, as every
-    other way of leaving a write unnamed is."""
+    """`fake=` naming the write itself is refused: it would run the real write under irimi."""
 
     def database_write(order: int) -> None:
         raise RealWriteRan("the real write ran")
@@ -550,9 +540,9 @@ class _Repository:
 
 
 def test_a_static_method_stand_in_is_judged_and_called_as_its_function(posted):
-    """A `staticmethod` in a class body is callable, but `inspect` sees neither its nature nor a
-    generator through it: an async one was refused as sync, and a generator one slipped through.
-    """
+    """A `staticmethod` fake is judged by its function, which `inspect` cannot see through it.
+
+    Judged as the wrapper, an async one would be refused as sync and a generator let through."""
     assert _Repository.save(1) == "stood in for 1"
     assert asyncio.run(_Repository.save_async(2)) == "stood in async for 2"
     assert [doc["name"] for _, _, doc in posted.posts] == ["repo.save", "repo.save_async"]
@@ -710,8 +700,7 @@ def test_irimi_shadow_prints_a_tool_call_in_the_stream_and_the_summary_and_store
 
 
 def test_the_posted_tool_call_is_valid_json_the_endpoint_reads(posted):
-    """`allow_nan=False` is how both the SDK and the store write: a NaN result is
-    captured as a marker, never posted as a bare NaN."""
+    """A NaN result is captured as a marker, never posted as a bare NaN."""
 
     @sdk.read_tool(name="db.nan")
     def nan() -> float:
@@ -735,8 +724,9 @@ def test_a_tool_name_is_cut_to_the_run_name_limit(posted):
 
 
 def test_a_long_tool_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(posted):
-    """A tool's name is cut before irimi redacts it, as a run's is: a key straddling the cut is
-    left out whole rather than kept in part, too short for its shape to be redacted."""
+    """A long tool name is cut before redaction, so a key straddling the cut is left out whole.
+
+    Kept in part, it would be too short for its shape to be redacted."""
     head = "n" * (limits.MAX_NAME - 10) + " "
 
     @sdk.read_tool(name=head + "ghp_" + "k" * 36)

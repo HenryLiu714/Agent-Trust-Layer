@@ -26,9 +26,6 @@
   "tests/safety/test_scope_rule.py": {
     "caps_run": 4
   },
-  "tests/sdk/test_tools.py": {
-    "caps_run": 1
-  },
   "tests/test_targets.py": {
     "caps_run": 1
   },

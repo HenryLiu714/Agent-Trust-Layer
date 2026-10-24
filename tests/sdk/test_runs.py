@@ -1,10 +1,4 @@
-"""The SDK, `irimi.sdk`, against a real engine and a real `DirectoryStore`.
-
-Every run here is posted over a socket to the engine's control endpoint, and every claim
-about it is read back off disk with `StoreReader` once the engine has stopped. The capture rules,
-which are pure, are tested row by row at the end, and so is the promise that `import irimi.sdk`
-pulls in no mitmproxy.
-"""
+"""The SDK's runs and triggers against a real engine and store, read back off disk."""
 
 import asyncio
 import contextlib
@@ -158,8 +152,7 @@ def test_a_run_id_is_16_lower_case_hex_characters(irimi):
 
 
 def test_an_exchange_the_run_labels_lands_in_the_run_the_sdk_started(irimi, upstream):
-    """The start is posted before the trigger's body runs, so an exchange labelled with the run
-    reaches a run that already has its record: `sdk`, never a `header` run."""
+    """A labelled exchange lands in the SDK's run, never a `header` run: the start comes first."""
 
     @sdk.trigger
     def fetch() -> int:
@@ -190,8 +183,9 @@ class _Posts:
 
 
 def test_the_start_is_posted_before_the_body_runs_and_the_end_after_it(monkeypatch):
-    """So the start reaches irimi before the run's first request and the end after its last. The
-    store would make a late start's run `sdk` all the same, so only the order shows it."""
+    """The start reaches irimi before the run's first request, and the end after its last.
+
+    The store makes a late start's run `sdk` all the same, so only the order shows it."""
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     log: list[str] = []
     monkeypatch.setattr(state, "reporter", _Posts(log))
@@ -212,10 +206,9 @@ def test_the_start_is_posted_before_the_body_runs_and_the_end_after_it(monkeypat
 
 
 def test_the_sdk_never_posts_through_the_agents_proxy(irimi, monkeypatch):
-    """The agent's `HTTP_PROXY` names irimi's listener too, and urllib's default opener would send
-    the post there as a proxied request whenever NO_PROXY does not cover the endpoint's host. The
-    SDK's opener has no proxies at all. The client is built after the variables are set, as the
-    SDK's is in an agent `irimi shadow` started: urllib reads them when an opener is built."""
+    """The SDK's control posts never use the agent's proxy variables, which name irimi too.
+
+    The client is built after the variables are set, as in an agent `irimi shadow` started."""
     with _recorder() as (port, hits):
         for name in PROXY_ENVS:
             monkeypatch.setenv(name, f"http://127.0.0.1:{port}")
@@ -229,9 +222,7 @@ def test_the_sdk_never_posts_through_the_agents_proxy(irimi, monkeypatch):
 
 
 def test_an_async_trigger_waits_for_its_posts_off_the_event_loop(monkeypatch):
-    """A post takes as long as irimi takes to answer. An async trigger waits for each of its two
-    in a worker thread (`asyncio.to_thread`), so the agent's other tasks run meanwhile: here a
-    ticker, counted while the start is posted and again while the end is."""
+    """An async trigger posts in a worker thread, so a ticker task runs during each post."""
     with _recorder(status=204, delay=0.5) as (port, hits):
         monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
         monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
@@ -280,9 +271,9 @@ def test_a_trigger_that_raises_re_raises_the_same_object_and_its_run_ends_in_err
 
 
 def test_an_exception_named_past_what_the_control_endpoint_takes_still_ends_its_run(irimi):
-    """A class made with `type()` may be named anything. Posted whole, a name past the control
-    endpoint's 2 MiB made the run's end a 413, and the run never ended. The SDK posts the type
-    cut to MAX_POSTED_TYPE, and the store keeps MAX_ERROR_TYPE of it, redacted."""
+    """An exception type named past 2 MiB is cut to MAX_POSTED_TYPE, so the run's end still posts.
+
+    The store keeps MAX_ERROR_TYPE of it, redacted."""
     name = "H" * (3 * 1024 * 1024)
     huge = type(name, (Exception,), {})
     with pytest.raises(huge), sdk.run("huge"):
@@ -327,9 +318,9 @@ def test_a_cancelled_async_trigger_ends_its_run_in_error_and_stays_cancelled(iri
 
 
 def test_a_trigger_cancelled_while_its_start_is_posted_leaves_no_run_current(monkeypatch):
-    """`async with` calls no `__aexit__` when `__aenter__` raises, so a task cancelled while its
-    start is posted must leave the run itself, or a caller that catches the cancellation and goes
-    on would still be inside it."""
+    """A task cancelled while its start is posted leaves the run itself.
+
+    `async with` calls no `__aexit__` when `__aenter__` raises."""
     with _recorder(status=204, delay=0.5) as (port, _hits):
         monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
         monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{port}/_irimi")
@@ -352,9 +343,9 @@ def test_a_trigger_cancelled_while_its_start_is_posted_leaves_no_run_current(mon
 
 
 def test_an_interruption_while_the_end_is_posted_still_leaves_no_run_current(monkeypatch):
-    """A KeyboardInterrupt (sync) or a cancellation (async) that arrives while the end is posted
-    propagates, as it would from any other line, with the agent's own exception as its
-    `__context__`. Either way the run is left: the context variable is always reset."""
+    """An interrupt or cancellation while the end is posted propagates, and the run is left.
+
+    The agent's own exception is its `__context__`."""
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     boom = ValueError("x")
 
@@ -408,11 +399,10 @@ def test_an_interruption_while_the_end_is_posted_still_leaves_no_run_current(mon
 
 
 def test_an_async_trigger_closed_mid_run_ends_its_run_and_raises_nothing(monkeypatch):
-    """A coroutine closed rather than awaited - by hand, or a pending task the garbage collector
-    reclaims - is closed with GeneratorExit, during which nothing may be awaited: an await there
-    is "coroutine ignored GeneratorExit", raised into whoever closed it. So the end is posted
-    inline, and the run left even from the collector's context, which is not the one that entered
-    it. Neither the closer nor `sys.unraisablehook` sees an error of the SDK's."""
+    """A coroutine closed mid-run posts its end inline and leaves the run, raising nothing.
+
+    Nothing may be awaited during GeneratorExit, and the collector may close it from another
+    context. Neither the closer nor `sys.unraisablehook` sees an error of the SDK's."""
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     log: list[str] = []
     monkeypatch.setattr(state, "reporter", _Posts(log))
@@ -527,8 +517,9 @@ JOB = sdk.run("job")  # one object, entered from everywhere, as a module constan
 
 
 def test_one_sdk_run_object_may_be_entered_nested_on_threads_and_in_tasks_at_once(irimi):
-    """Each entry is a scope of its own, kept per context: nested in itself it joins its own run,
-    and two threads or two tasks inside it at once are two runs that end separately."""
+    """Each entry of one `sdk.run` is its own scope, kept per context.
+
+    Nested in itself it joins its own run; two threads or tasks inside it are two runs."""
     with JOB:
         outer_id = sdk.current_run_id()
         with JOB:
@@ -569,9 +560,9 @@ def test_one_sdk_run_object_may_be_entered_nested_on_threads_and_in_tasks_at_onc
 
 
 def test_an_exit_in_a_context_that_made_no_entry_ends_nothing_and_does_not_raise(irimi):
-    """An async generator closed by another task leaves its `async with sdk.run(...)` in a context
-    other than the one it entered in. That exit has no entry of its own to end, so it ends none,
-    and the run is stored incomplete rather than ended by the wrong caller."""
+    """An exit from a context that made no entry ends nothing; the run is stored incomplete.
+
+    An async generator closed by another task exits in a context other than the one it entered."""
     block = sdk.run("moved")
     entered = contextvars.copy_context()
     run_id = entered.run(lambda: (block.__enter__(), sdk.current_run_id())[1])
@@ -582,9 +573,7 @@ def test_an_exit_in_a_context_that_made_no_entry_ends_nothing_and_does_not_raise
 
 
 def test_an_exit_in_a_context_that_only_inherited_an_entry_leaves_it_to_its_maker(irimi):
-    """A thread handed the block's context by `sdk.propagate` holds the block's entry too, but
-    did not make it: its stray exit ends nothing and raises nothing, and the block that made the
-    entry still ends its own run, once."""
+    """A propagated thread's stray exit ends nothing; the block that made the entry ends it once."""
     with JOB:
         run_id = sdk.current_run_id()
         with ThreadPoolExecutor(1) as pool:
@@ -596,9 +585,9 @@ def test_an_exit_in_a_context_that_only_inherited_an_entry_leaves_it_to_its_make
 
 
 def test_a_stray_exit_after_the_block_has_ended_ends_nothing_and_does_not_raise(irimi):
-    """The same stray exit as above, made after the block's own: the entry it inherited has been
-    taken off by its maker, whose token is spent. Resetting a spent token is a RuntimeError, which
-    reached the agent, where one not yet spent is a ValueError, which did not."""
+    """The same stray exit after the block's own, when its token is spent, still raises nothing.
+
+    Resetting a spent token is a RuntimeError, not the ValueError of an unspent one."""
     with JOB:
         run_id = sdk.current_run_id()
         stray = sdk.propagate(JOB.__exit__)
@@ -619,8 +608,9 @@ def test_instrument_is_called_once_per_new_run_and_never_for_a_joined_one(irimi,
 
 
 def test_a_start_interrupted_while_posted_leaves_no_run_current(irimi, monkeypatch):
-    """A KeyboardInterrupt while a sync start is posted: `with` calls no `__exit__`, so the scope
-    leaves the run itself. The next trigger is a run of its own, not a silent join."""
+    """An interrupt while a sync start is posted leaves the run, so the next trigger is its own.
+
+    `with` calls no `__exit__` here, so the scope leaves the run itself."""
 
     class Interrupted:
         def __init__(self) -> None:
@@ -654,8 +644,7 @@ def test_an_instrument_that_raises_costs_one_warning_and_never_the_agents_call(
 
 
 def test_an_async_trigger_driven_with_no_asyncio_loop_posts_inline(irimi):
-    """A coroutine driven by trio, or by hand, has no asyncio loop for `asyncio.to_thread`: the
-    posts are made inline instead of raising into the agent."""
+    """With no asyncio loop, as under trio or by hand, an async trigger posts inline."""
 
     @sdk.trigger
     async def no_loop() -> str | None:
@@ -670,9 +659,9 @@ def test_an_async_trigger_driven_with_no_asyncio_loop_posts_inline(irimi):
 
 
 def test_an_async_trigger_whose_loop_takes_no_more_threads_posts_inline(irimi):
-    """A loop whose default executor has been shut down - at the end of `asyncio.run`, or once
-    the interpreter is exiting - refuses `asyncio.to_thread` with RuntimeError, which reached the
-    agent. The posts are made inline instead."""
+    """When the loop's executor is shut down, an async trigger posts inline instead of raising.
+
+    That happens at the end of `asyncio.run` and while the interpreter exits."""
 
     async def late() -> str | None:
         await asyncio.get_running_loop().shutdown_default_executor()
@@ -728,9 +717,9 @@ async def synchronous_handler(charge: str) -> tuple[str, str | None]:
 
 @pytest.mark.parametrize("active", [False, True])
 def test_a_sync_entrypoint_to_an_async_function_still_returns_its_value(irimi, monkeypatch, active):
-    """`functools.wraps` makes the wrapper look async to `inspect.unwrap`, but it returns the
-    value, not a coroutine. Wrapped as async, a call returned an unawaited coroutine and the body
-    never ran - in production too, with the SDK inactive."""
+    """A sync wrapper around an async function is triggered as sync and returns its value.
+
+    `functools.wraps` makes it look async to `inspect.unwrap`."""
     if not active:
         monkeypatch.delenv(ENGINE_ACTIVE_ENV)
     charge, run_id = synchronous_handler("ch_1")
@@ -755,9 +744,9 @@ def settle(charge: str) -> Any:
 
 
 def test_a_sync_trigger_that_returns_a_coroutine_keeps_its_run_until_the_coroutine_ends(irimi):
-    """The body is in the coroutine, so the run lasts until it is awaited to its end, in whatever
-    task awaits it, and its outcome is the coroutine's. Before, the run ended when the coroutine
-    was made, and the body ran outside every run."""
+    """The run lasts until the returned coroutine ends, in whatever task awaits it.
+
+    The run's outcome is the coroutine's."""
     log: list[str] = []
     inner = state.reporter
 
@@ -812,10 +801,10 @@ class Handlers:
 
 
 def test_a_static_or_class_method_stays_one_in_either_decorator_order(irimi):
-    """Above `@staticmethod`, the trigger returns a static method, not a plain function Python
-    would bind: called on an instance, the static method is never given the instance as its first
-    argument, even with the SDK inactive. Above `@classmethod`, it is not taken for a name passed
-    positionally."""
+    """A trigger above `@staticmethod` or `@classmethod` keeps it one, even with the SDK inactive.
+
+    A static method is never given the instance, and a class method's `cls` is not taken for a
+    name passed positionally."""
     ids = [
         call("ch_1")
         for handlers in (Handlers, Handlers())
@@ -845,17 +834,15 @@ class Handler:
     ids=["partial", "callable instance", "class"],
 )
 def test_what_has_no_importable_function_to_name_is_refused_at_decoration(target):
-    """A trigger records `module:qualname`, which replay imports. A partial or an instance
-    has none, and a class decorated would be
-    replaced by a function, so `isinstance` against it would break in production too."""
+    """A partial, an instance or a class is refused: replay imports `module:qualname`.
+
+    A decorated class would become a function, breaking `isinstance` in production too."""
     with pytest.raises(TypeError, match="function or a method"):
         sdk.trigger(target)
 
 
 def test_a_function_defined_with_no_module_is_refused_by_its_name():
-    """A function `exec` defines in a namespace with no `__name__` has `__module__` None, so no
-    `module:qualname` to import. It is refused as the others are, but by its name: the refusal
-    said it was "not function", which reads as a contradiction."""
+    """A function with `__module__` None is refused by its name, not as "not function"."""
     namespace: dict[str, Any] = {}
     exec("def on_message(body): ...", namespace)
     with pytest.raises(TypeError, match="on_message, which names no module"):
@@ -880,9 +867,9 @@ def test_a_name_that_is_not_a_string_is_refused_and_a_long_one_is_cut(irimi):
 
 
 def test_a_long_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(irimi):
-    """The SDK cuts a name before irimi redacts it: cut inside a key, the part it kept would be
-    too short for the key's shape, and reach disk. Cut outside secrets, the key is left out whole.
-    """
+    """A long name is cut outside secrets, so a key across the cut is left out whole.
+
+    A part kept would be too short for the key's shape, and reach disk unredacted."""
     head = "n" * (limits.MAX_NAME - 10) + " "
     with sdk.run(head + "ghp_" + "k" * 36):
         pass
@@ -890,9 +877,10 @@ def test_a_long_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(irimi):
 
 
 def test_a_trigger_annotated_with_a_type_checking_only_import_still_binds_by_name():
-    """Python 3.14 evaluates annotations lazily, and `inspect.signature` would evaluate them: a
-    name imported only under `TYPE_CHECKING` raised NameError, and every call was captured as one
-    that did not bind. On 3.12 the module needs `from __future__ import annotations` to load."""
+    """Arguments bind by name even when an annotation names a `TYPE_CHECKING`-only import.
+
+    `inspect.signature` would evaluate the lazy annotations and raise NameError. On 3.12 the
+    module needs `from __future__ import annotations` to load."""
     source = "def refund(charge: str, amount: Decimal) -> None: ...\n"
     if sys.version_info < (3, 14):
         source = "from __future__ import annotations\n" + source
@@ -908,8 +896,9 @@ def test_a_trigger_annotated_with_a_type_checking_only_import_still_binds_by_nam
 
 
 class _Recorder(http.server.BaseHTTPRequestHandler):
-    """Records the target of every request it gets - absolute-form when it was sent to it as a
-    proxy - and answers `status` after `delay` seconds, pointing at `location` when it is set."""
+    """Record each request's target and answer `status` after `delay`, to `location` if set.
+
+    A target is absolute-form when the request was sent to it as a proxy."""
 
     hits: list[str]
     status = 500
@@ -1025,9 +1014,7 @@ def test_a_refused_post_is_one_warning_quoting_irimis_answer(irimi, monkeypatch,
 
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 def test_a_redirect_is_a_refused_post_never_followed(monkeypatch, warnings, status):
-    """irimi's endpoint never redirects, so a redirect is an answer from something else. urllib
-    followed a 301, 302 or 303 as a GET to wherever it pointed, outside the proxy, and called the
-    run recorded when that answered 200; it is refused like any answer outside 2xx."""
+    """A redirect is refused like any answer outside 2xx: irimi's endpoint never redirects."""
     with (
         _recorder(status=200) as (elsewhere, landed),
         _recorder(status=status, location=f"http://127.0.0.1:{elsewhere}/x") as (port, hits),
@@ -1040,9 +1027,7 @@ def test_a_redirect_is_a_refused_post_never_followed(monkeypatch, warnings, stat
 
 
 def test_irimi_control_with_a_trailing_slash_names_the_same_endpoint(irimi, monkeypatch, warnings):
-    """irimi sets `IRIMI_CONTROL` with no trailing slash, but serve mode has the agent's
-    deployment set it by hand. One typed with a slash posted to `/_irimi//runs/...`, a 404, and
-    every run was lost."""
+    """An `IRIMI_CONTROL` set by hand with a trailing slash posts to the same routes."""
     monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{irimi.port}/_irimi/")
     run_id = handle(1)
     assert warnings() == []
@@ -1051,9 +1036,7 @@ def test_irimi_control_with_a_trailing_slash_names_the_same_endpoint(irimi, monk
 
 
 def test_every_action_the_sdk_posts_is_one_the_control_endpoint_answers():
-    """The SDK and the endpoint spell a run route from the same names (`RUNS_ROUTE`,
-    `RUN_ACTIONS`), so an action the SDK posts can never be one the endpoint 404s.
-    """
+    """Every run action the SDK posts is a route the control endpoint answers."""
     assert typing.get_type_hints(client.Reporter.post)["action"] is RunAction
     assert set(typing.get_args(RunAction)) == set(RUN_ACTIONS)
 
@@ -1086,8 +1069,7 @@ def test_a_fault_of_the_clients_own_is_a_warning_not_an_exception(monkeypatch, w
 def test_an_unreachable_endpoint_pauses_every_send_for_30s_then_irimi_is_asked_again(
     monkeypatch, warnings, refused_port
 ):
-    """A stalled irimi costs the agent one timeout, not one per call: the breaker skips every
-    post and lookup while it is open, silently, and the first send after it closes goes out."""
+    """A stalled irimi costs one timeout: the breaker skips every send for 30 s, then retries."""
     now = [100.0]
     reporter = client.ControlClient(clock=lambda: now[0])
     monkeypatch.setenv(CONTROL_ENV, f"http://127.0.0.1:{refused_port}/_irimi")
@@ -1110,8 +1092,7 @@ def test_an_unreachable_endpoint_pauses_every_send_for_30s_then_irimi_is_asked_a
 def test_a_proxy_speaking_another_protocol_is_one_warning_naming_both_versions(
     irimi, monkeypatch, warnings
 ):
-    """Every post names the protocol the SDK speaks; the endpoint answers another major 426,
-    with its own, and the SDK says both once, whatever it was posting."""
+    """A 426 from a proxy on another protocol major gives one warning naming both versions."""
     monkeypatch.setattr(client, "PROTOCOL_VERSION", "2")
     assert handle(1) is not None and handle(2) is not None
     assert state.reporter.recorded("r1", "db.read", {}) is None

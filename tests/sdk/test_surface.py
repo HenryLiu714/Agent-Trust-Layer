@@ -1,8 +1,6 @@
 """The SDK's public surface is exactly its `__all__`, and it imports only what an agent can carry.
 
-An agent imports `irimi.sdk` in its own process, so every implementation module is private and
-the SDK reaches only the stdlib and irimi's low, dependency-free modules.
-"""
+Every implementation module is private, and the SDK reaches only the stdlib and low modules."""
 
 import ast
 import sys

@@ -1,14 +1,6 @@
-"""The tool decorators under replay, against a real engine replaying a stored run.
+"""The tool decorators under replay: each test records a run, then replays it on a second engine.
 
-Each test records a run first, through a shadow engine and a real `DirectoryStore`, then starts a
-second engine answering from that run - a `ReplayPolicy` over its `ReplayIndex`, which answers the
-control endpoint's lookups too, as `cli.compose.build_engine` builds it - with this process set
-up as `irimi shadow` sets up a replay's child: `IRIMI_REPLAY_RUN` names the engine's run. Every
-claim about what the replay stored is read back off disk once its engine has stopped.
-
-A read tool's real function raises `_RealReadRan` for the accounts in `_FORBIDDEN`, and a write
-tool's always raises `RealWriteRan`, so a test that let either run where it must not fails on it.
-"""
+A real read for `_FORBIDDEN` accounts, or any real write, raises, so one that runs fails loudly."""
 
 import asyncio
 import contextlib
@@ -164,17 +156,16 @@ class _Irimi:
         return self._only_sdk_run(StoreReader(self.root), set())
 
     def replay(self, run_id: str, script: Callable[[], Any]) -> tuple[Any, list[ToolCall]]:
-        """`script` run again in one SDK run under an engine answering from `run_id`, which adopts
-        the engine's run as `irimi replay`'s child does: what it returned, and the replay
-        run's tool calls as stored."""
+        """Run `script` again under an engine replaying `run_id`; return its value and tool calls.
+
+        The script's SDK run adopts the engine's run, as `irimi replay`'s child does."""
         before = {r.run_id for r in StoreReader(self.root).list_runs()}
         events = StoreReader(self.root).load_run(run_id).events
         recording = ReplayIndex.from_events(events, self.key, self.cfg.maps)
         # Each replay is a run of its own, the engine's, as each `irimi replay` mints one.
         self.cfg = dataclasses.replace(self.cfg, run_id=new_run_id())
         store = DirectoryStore(self.root, self.key, replay_of=run_id)
-        # Stored before the script runs, as `irimi replay` stores its run before its child exists,
-        # so the run is read back whatever reached the engine.
+        # Stored before the script runs, as `irimi replay` stores its run before its child exists.
         store.start_run(
             RunRecord.process(self.cfg.run_id, ["script"], None, time.time(), replay_of=run_id)
         )
@@ -226,7 +217,7 @@ def _post(port: int, path: str, body: object, method: str = "POST") -> tuple[int
 def test_a_read_tool_the_recording_holds_returns_its_recorded_result_and_never_runs(irimi):
     _BALANCES["acc_1"] = 100
     run_id = irimi.record(lambda: balance("acc_1"))
-    # The world moved on since the recording, and the real read may not run at all.
+    # Live state differs from the recording, and the real read must not run at all.
     _BALANCES["acc_1"] = 5
     _FORBIDDEN.add("acc_1")
     result, [call] = irimi.replay(run_id, lambda: balance("acc_1"))
@@ -331,8 +322,7 @@ def test_an_async_read_tool_is_answered_from_the_recording(irimi):
 
 
 def test_a_sync_tool_that_returned_a_coroutine_is_answered_with_a_coroutine_again(irimi):
-    """The agent awaits what the tool returns: a replay that handed it the recorded list would
-    raise TypeError at its `await`."""
+    """A sync tool that returned a coroutine is answered with one, so the agent's `await` works."""
 
     async def awaits() -> list[int]:
         return await history("acc_1")
@@ -357,8 +347,7 @@ def test_a_dataclass_result_is_revived_as_the_dataclass(irimi):
 
 
 def test_a_secret_in_a_recorded_result_comes_back_as_its_placeholder(irimi):
-    """The store redacted the result before it wrote it, so the recording holds no secret
-    to hand back, and README says so."""
+    """A secret in a recorded result comes back as its placeholder: the store redacted it."""
     run_id = irimi.record(lambda: api_key("acc_1"))
     _FORBIDDEN.add("acc_1")
     result, [call] = irimi.replay(run_id, lambda: api_key("acc_1"))
@@ -428,8 +417,7 @@ def test_an_inactive_sdk_never_asks_the_recording(monkeypatch):
 
 @pytest.mark.parametrize("run_env", [None, "another0another0"])
 def test_a_replay_id_irimi_did_not_set_asks_no_recording(monkeypatch, run_env):
-    """An `IRIMI_REPLAY_RUN` beside no `IRIMI_RUN`, or another, is a stale export, not irimi's
-    word (`context.replay_run_id`): the read tool runs for real and only posts its call."""
+    """A stale `IRIMI_REPLAY_RUN` is ignored: the read tool runs for real and posts its call."""
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
     if run_env is None:
@@ -439,8 +427,7 @@ def test_a_replay_id_irimi_did_not_set_asks_no_recording(monkeypatch, run_env):
     posted: list[str] = []
 
     class _Writes:
-        """Writes down each post and each lookup; a lookup that raised would be swallowed as a
-        failed one (`_replay_answer` never raises), so it is counted instead."""
+        """Note each post and lookup; a lookup is counted, since a raise would be swallowed."""
 
         def post(self, run_id: str, kind: str, payload: Any) -> None:
             posted.append(kind)
@@ -524,8 +511,7 @@ def test_the_lookup_route_is_validated_like_every_control_route(
 
 @pytest.mark.parametrize("run_id", ["unattributed", "t3st"])
 def test_a_tool_called_in_no_run_or_the_process_run_may_ask_the_recording(irimi, run_id):
-    """A tool outside every SDK run is filed in the process run, or in `unattributed` when there
-    is none, and asks its recording from there."""
+    """A tool in no SDK run asks the recording from the process run, or from `unattributed`."""
     recorded = irimi.record(lambda: balance("acc_1"))
     events = StoreReader(irimi.root).load_run(recorded).events
     recording = ReplayIndex.from_events(events, irimi.key, irimi.cfg.maps)
@@ -554,9 +540,9 @@ def test_a_replay_s_child_is_told_it_replays_and_a_shadow_run_s_never_is(tmp_pat
 
 
 def test_a_run_that_ends_on_a_recorded_error_records_the_recorded_type(irimi):
-    """The recorded run ends on `builtins.KeyError`. Its replay raises the same, as
-    `RecordedToolError`, out of a run that adopted the replay's and so posts no end of its own:
-    `irimi replay` ends the replay's run with how its child exited."""
+    """A replay re-raises the recorded `builtins.KeyError` as `RecordedToolError`.
+
+    The adopted run posts no end of its own: `irimi replay` ends it with how its child exited."""
 
     def ends_on_it() -> None:
         balance("acc_missing")
@@ -576,16 +562,14 @@ def test_a_run_that_ends_on_a_recorded_error_records_the_recorded_type(irimi):
 
 @pytest.mark.parametrize("kind", ["builtins.KeyboardInterrupt", "builtins.SystemExit"])
 def test_a_recorded_builtin_that_is_no_exception_is_never_raised_as_itself(kind):
-    """A recorded Ctrl-C is the recording's interruption, not what the tool does: it comes back
-    as a plain RecordedToolError, which an agent's `except Exception` may catch."""
+    """A recorded Ctrl-C or exit comes back as a plain RecordedToolError, never as itself."""
     raised = recorded_error(ErrorInfo(kind, ""))
     assert type(raised) is sdk.RecordedToolError
 
 
 @pytest.mark.parametrize("kind", ["builtins.KeyError", "myapp.errors.NotFound"])
 def test_a_recorded_tool_error_pickles_and_copies_as_itself(kind):
-    """An agent that hands exceptions across processes (a process pool, a task queue) must not
-    break in a replay where it worked in the recording."""
+    """A RecordedToolError pickles and copies, so agents can hand it across processes."""
     raised = recorded_error(ErrorInfo(kind, "'acc_1'"))
     for again in (pickle.loads(pickle.dumps(raised)), copy.copy(raised)):
         assert type(again) is type(raised)
@@ -595,8 +579,7 @@ def test_a_recorded_tool_error_pickles_and_copies_as_itself(kind):
 def test_an_async_tool_outside_a_replay_runs_its_body_without_a_hop_off_the_loop(
     irimi, monkeypatch
 ):
-    """Only a read in a replay waits on the endpoint: shadow mode's async tools go straight to
-    their bodies, so an agent whose executor is busy is never held up by one."""
+    """Under shadow, async tools go straight to their bodies; only a replay's read waits."""
     hops: list[str] = []
     real = runs.off_the_loop
 
@@ -609,7 +592,7 @@ def test_an_async_tool_outside_a_replay_runs_its_body_without_a_hop_off_the_loop
     assert "_replay_answer" not in hops
 
 
-# -- found on the verification pass --------------------------------------------------------------
+# -- misses, bounds and the lookup's path ----------------------------------------------------------
 
 
 @sdk.read_tool(name="db.slow")
@@ -631,10 +614,9 @@ def _times_out() -> str:
 
 
 def test_a_recorded_call_that_was_cancelled_is_a_miss_and_the_tool_runs(irimi):
-    """A call the agent's own timeout cancelled recorded `CancelledError`, which the tool never
-    raised. Answered with it, the agent's `except TimeoutError` would meet a RecordedToolError and
-    the replay would end where the recording went on; it runs again instead, and is cancelled
-    again."""
+    """A recorded `CancelledError` is a miss: the tool runs again, and is cancelled again.
+
+    Answered with it, the agent's `except TimeoutError` would meet a RecordedToolError instead."""
     run_id = irimi.record(_times_out)
     [recorded] = [
         e for e in StoreReader(irimi.root).load_run(run_id).events if isinstance(e, ToolCall)
@@ -647,8 +629,7 @@ def test_a_recorded_call_that_was_cancelled_is_a_miss_and_the_tool_runs(irimi):
 
 
 def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
-    """`GeneratorExit` is what a coroutine closed before it finished records: no outcome of the
-    tool's own either."""
+    """A recorded `GeneratorExit` is a miss: it is no outcome of the tool's own."""
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
     monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
@@ -667,8 +648,7 @@ def test_a_recorded_call_that_was_closed_unawaited_is_a_miss(monkeypatch):
 
 
 def test_an_inactive_sdk_is_never_told_it_replays(monkeypatch):
-    """`replay_run_id` is the one rule for "this is a replay", which `RunScope` asks too: a
-    variable left in an environment irimi is not in front of says nothing."""
+    """With the SDK inactive, a leftover `IRIMI_REPLAY_RUN` does not make a replay."""
     monkeypatch.setenv(RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(REPLAY_RUN_ENV, "abcd1234abcd1234")
     monkeypatch.setenv(ENGINE_ACTIVE_ENV, "1")
@@ -739,8 +719,7 @@ def test_an_answer_the_sdk_cannot_read_is_a_miss_warned_once(monkeypatch, warnin
 
 
 def test_an_answer_past_the_bound_is_a_miss_and_is_never_read_whole(monkeypatch, warnings):
-    """irimi's own answer is at most a recorded call; one larger is from something else on the
-    port, and is not read into the agent's memory to the end."""
+    """An answer larger than any recorded call is a miss, and is not read whole."""
     monkeypatch.setattr(client, "MAX_ANSWER", 1000, raising=False)
     body = json.dumps({**_HIT, "result": {"account": "acc_1", "pad": "x" * 2000}}).encode()
     with _answering(monkeypatch, 200, body):
@@ -750,8 +729,7 @@ def test_an_answer_past_the_bound_is_a_miss_and_is_never_read_whole(monkeypatch,
 
 
 def test_a_lookup_carries_no_run_header_and_never_goes_through_a_proxy(monkeypatch, refused_port):
-    """A control request, as the posts are: unlabelled under `instrument()`, and to the
-    endpoint itself whatever `HTTP_PROXY` says."""
+    """A lookup goes unlabelled, straight to the endpoint, whatever `HTTP_PROXY` says."""
     monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{refused_port}")
     with (
         _answering(monkeypatch, 200, json.dumps(_HIT).encode()) as seen,
@@ -787,8 +765,7 @@ class Ledger:
 
 
 def test_method_tools_and_a_tool_on_a_thread_are_answered_from_the_recording(irimi):
-    """The receiver is no argument, so a method's call matches on what it was given; a thread the
-    agent hands the run to (`sdk.propagate`) asks from that run."""
+    """A method tool matches without its receiver, and a propagated thread asks from its run."""
 
     def script() -> list[Any]:
         got: list[Any] = []

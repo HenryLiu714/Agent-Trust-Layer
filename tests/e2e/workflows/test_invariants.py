@@ -193,7 +193,7 @@ def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode)
     ]
     assert held_back, "invariant 1: no shadow run held back a write its bare run made"
     assert labelled_live, "invariant 2: no labelled call was forwarded live under shadow"
-    assert stood_in, "invariant 3: no write tool ran for real bare and as a stand-in shadow"
+    assert stood_in, "invariant 3: no write tool ran for real bare and its fake under shadow"
     assert handled_canary, "invariant 4: no canary credential passed through irimi"
     assert served_canary, "invariant 4: no live read handed back a canary credential"
     assert seen_escape, "invariant 1: no `leaks` scenario's escape reached a fake service"

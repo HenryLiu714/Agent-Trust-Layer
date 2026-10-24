@@ -107,7 +107,7 @@ def _alone(reason: str, *ends: tuple[str, int, tuple[int, int, int, int] | None]
 _LOOP = "the trigger schedules its task on the event loop `main()` runs, and raises without it"
 _THREAD = (
     "the thread the trigger starts without `propagate` made its calls in the process run, which "
-    "the run's recording lacks (#75), so its refund misses and is faked again"
+    "the run's recording lacks, so its refund misses and is faked again"
 )
 _ACCOUNTS = "a tool reads the accounts table the agent's `main()` creates, and raises without it"
 _RECORD = (

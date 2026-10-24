@@ -84,7 +84,7 @@ def test_a_delegated_write_is_attributed_and_its_target_never_sees_the_run_heade
     assert status == 200
     ((method, path, _, received),) = target.seen
     assert (method, path) == ("POST", "/w")
-    assert not carries_run_header(received.items()), "the run id reached the answer target"
+    assert not carries_run_header(received.items()), "the run id reached the target"
     (ex,) = seen
     assert (ex.answered_by, ex.run_id) == ("delegated", "abc")
     assert not carries_run_header(ex.request.headers)

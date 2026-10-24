@@ -91,20 +91,20 @@ class StandInReader(reader.UpstreamReader):
 
 # Placeholders rather than `str.format`: the source below is full of literal braces.
 BASE_URL_CHILD = '''
-"""Both doors, spelled the way the two SDKs in the fixture spell them.
+"""Proxy and base-URL mode, spelled the way the two SDKs in the fixture spell them.
 
 The read goes through the forward proxy, which is what `requests`, `httpx` and `slack_sdk` do
-with `HTTPS_PROXY` set. The refund goes through the reverse door, which is what `stripe-python`
-does once `stripe.api_base` is the listener origin plus the upstream host, the base-URL mode
-`examples/quickstart/README.md` names.
+with `HTTPS_PROXY` set. The refund goes in base-URL mode, which is what `stripe-python` does
+once `stripe.api_base` is the listener origin plus the upstream host, as
+`examples/quickstart/README.md` describes.
 """
 import http.client, os, urllib.parse
 
-door = urllib.parse.urlparse(os.environ["HTTPS_PROXY"])
+listener = urllib.parse.urlparse(os.environ["HTTPS_PROXY"])
 
 
 def call(method, target, host, body=None):
-    conn = http.client.HTTPConnection(door.hostname, door.port, timeout=10)
+    conn = http.client.HTTPConnection(listener.hostname, listener.port, timeout=10)
     # `credentials.AGENT_STRIPE_KEY`, joined here: the child imports nothing from the tests.
     headers = {"host": host, "authorization": "Bearer sk_test_" + "notreal"}
     if body is not None:
@@ -125,7 +125,7 @@ print("READ", status, stamp, charges.decode())
 status, refund, stamp = call(
     "POST",
     "/api.stripe.com/v1/refunds",
-    "127.0.0.1:%d" % door.port,
+    "127.0.0.1:%d" % listener.port,
     body="charge=__CHARGE__&amount=__AMOUNT__",
 )
 print("WRITE", status, stamp, refund.decode())

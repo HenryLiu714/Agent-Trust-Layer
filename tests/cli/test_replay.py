@@ -21,7 +21,7 @@ from tests.support.maps import REPLAY_LLM_MAP, REPLAY_STRIPE_MAP
 from tests.support.waiting import eventually
 
 AGENT = '''
-"""The agent `tests/cli/test_replay.py` records and replays (#84)."""
+"""The agent `tests/cli/test_replay.py` records and replays."""
 import http.client, json, os, urllib.parse
 from dataclasses import dataclass
 

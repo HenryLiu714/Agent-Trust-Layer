@@ -159,7 +159,9 @@ The store's own layout is in [trace-format.md](trace-format.md#layout).
   directories never collide and a blob is the same bytes whoever writes it. `unattributed/` is the
   one shared file, so each writer numbers its own lines there. A serve fills it, so a root has at
   most one: it holds an exclusive `flock` on `serve.lock`, which the kernel releases however the
-  process exits. `irimi shadow` takes no lock; `irimi runs rm` and `runs prune` take it.
+  process exits. Every store also holds a shared `flock` on the root directory while it writes,
+  and `irimi runs rm` and `runs prune` take both locks exclusively, so they never delete a run in
+  progress.
 - **Bounded memory.** An ended run's state is forgotten, so a long serve does not grow with the
   runs it has finished. `close` waits up to 10 seconds for the queue to drain.
 - **Reading back.** `record/store/reader.py` lists runs and loads one run's events in `seq` order,

@@ -206,7 +206,8 @@ values are captured, and which are replayable, is in
 - **Nesting.** A trigger or `sdk.run` inside a run joins it. One `sdk.run(...)` object may be
   entered again, nested, from several threads or tasks at once, or kept as a module constant; each
   entry outside a run is a run of its own.
-- **Names** are strings, cut to 1000 characters outside any secret's shape.
+- **Names** are strings, cut to 1000 characters outside any secret's shape; a secret across the
+  cut is replaced by `<redacted>`.
 - **A sync function that returns a coroutine** keeps its run, or its tool call open, until the
   coroutine finishes.
 - **A task outliving its run.** A task created inside a run keeps the run's id after the trigger

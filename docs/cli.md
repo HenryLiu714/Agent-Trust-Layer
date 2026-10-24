@@ -18,14 +18,16 @@ irimi maps [list]                       show the service maps irimi loads
 ```
 
 `irimi --version` prints the version. Abbreviated flags are refused: `--allow-t` is an error, not
-`--allow-remote-target`.
+`--allow-remote-target`. An argument no command takes is refused with that command's usage, and
+with a `hint:` when it is a flag 0.1.0 spelled otherwise (`--listen-host` is `--bind`), `--serve`
+(`irimi serve` is its own command), or a command to run typed without its `--`.
 
 ## Naming a run
 
 Wherever a command takes `RUN`, it accepts a full run id from `irimi runs list`, a prefix only one
 run id starts with (an ambiguous prefix is refused, listing the matches), `last` for the newest
-run, or `unattributed` for the events no run claimed. `irimi replay` also takes `--run=RUN`, for a
-run id that starts with `-`.
+run, or `unattributed` for the events no run claimed (`irimi replay` refuses it, since those
+events are no one run). `irimi replay` also takes `--run=RUN`, for a run id that starts with `-`.
 
 ## `irimi init`
 
@@ -163,11 +165,11 @@ irimi runs prune --older-than DURATION [--dry-run] [--store DIR]
 ```
 
 `runs rm` deletes the named runs; if any is not stored, it deletes nothing and exits 2.
-`runs prune` deletes every run that ended longer ago than `DURATION`, a whole number of hours or
-days (`12h`, `30d`); a run that has not ended is aged by when its files were last written, so a run
-an `irimi shadow` is still writing is never pruned. `--dry-run` lists what it would delete. Both
-delete the stored bodies no remaining run uses, and both are refused while an `irimi serve` holds
-the store's lock. Neither checks for an `irimi shadow` writing the run you name.
+`runs prune` deletes every run that ended longer ago than `DURATION`, a positive whole number of
+hours or days (`12h`, `30d`); a run that has not ended, left by an irimi that crashed, is aged by
+when its files were last written. `--dry-run` lists what it would delete. Both delete the stored
+bodies no remaining run uses, and both, `--dry-run` included, are refused (exit 2) while any irimi
+process writes the store: a shadow, a replay or a serve. So a run in progress is never deleted.
 
 ## `irimi compare`
 

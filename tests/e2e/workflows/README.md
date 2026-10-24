@@ -28,17 +28,17 @@ and whether the invariants below held.
 
 | | Workflow | Trigger | What it exercises |
 |---|---|---|---|
-| W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop with Stripe refunds; precondition checks, idempotency, `irimi compare`, and most of `irimi replay` |
-| W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination over a cursor irimi minted, 40 writes in one run, a block with no entrypoint to replay |
+| W1 | `w01_ticket_triage` | support-ticket webhook | a multi-turn LLM tool loop with Stripe refunds; precondition checks, idempotency, `irimi compare`, most of `irimi replay`, and deleting runs mid-run |
+| W2 | `w02_nightly_reconcile` | scheduled `sdk.run` | pagination over a cursor irimi minted, 40 writes in one run, a block with no entrypoint to replay, look-alike fields and a key across a run name's cut |
 | W3 | `w03_queue_worker` | queue, threads and asyncio | run attribution under concurrency across six HTTP clients, shared connection pools, write tools on many threads |
-| W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads, names and ids, missing scopes, archived channels, incoming webhooks |
+| W4 | `w04_slack_ops_bot` | Slack Events API | Slack fidelity: minted threads, names and ids, missing scopes, archived channels, incoming webhooks, posts that print alike |
 | W5 | `w05_dispute_responder` | signed Stripe webhook | a `bytes` trigger, the webhooks a write would fire, a live read whose response holds a credential |
 | W6 | `w06_crm_db_agent` | CLI | tools the proxy cannot see: database and file writes as write tools, their fakes, and replayed read tools |
 | W7 | `w07_streaming_assistant` | streaming HTTP endpoint | SSE streams recorded chunk by chunk, hang-ups and resets mid-stream, a stream that outlives its run |
-| W8 | `w08_orchestrator` | nested triggers and an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop, a target nothing listens on |
-| W9 | `w09_scope_gauntlet` | none (a plain script) | every classification edge: the scope rule, unsafe verbs, odd and oversized bodies, forged irimi headers, base-URL mode, the control endpoint by hand |
-| W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets, a failed check read, a run that raises or is killed, a control endpoint that is gone |
-| W11 | `w11_leaky_agent` | CLI | what irimi cannot see: clients that ignore the proxy, raw sockets, loopback sidecars |
+| W8 | `w08_orchestrator` | nested triggers and an internal service | nested runs, unmapped internal hosts, `Irimi-Run` across a hop, a target nothing listens on, a remote target refused |
+| W9 | `w09_scope_gauntlet` | none (a plain script) | every classification edge: the scope rule, unsafe verbs, odd and oversized bodies, forged irimi headers, base-URL mode and its refusals (`HEAD` included), the control endpoint by hand |
+| W10 | `w10_flaky_upstream` | CLI | retries, timeouts, resets, a failed check read, two checks at once, an error on a faked refund's read, a run that raises or is killed, a control endpoint that is gone or stalls |
+| W11 | `w11_leaky_agent` | CLI | what irimi cannot see: clients that ignore the proxy or refuse its CA, raw sockets, loopback sidecars |
 
 Each workflow is a package under `agents/`: `agent.py` is the agent, started with `python -m
 <module>` so the SDK records its real module name, and `scenarios.py` defines `WORKFLOW`, which
@@ -54,8 +54,8 @@ owes) and `test_control_endpoint.py` (what the SDK posts).
 - `harness/services.py` holds the fake services. They keep state, so a bare run's second refund of
   a charge is really refused, and the scripted LLM answers from a function of the prompt.
 - `harness/scenario.py`, `execute.py`, `result.py`, `invariants.py` and `compare.py` define a
-  scenario, run it in a mode, read what the run left, check the invariants, and read `irimi
-  compare`'s rows. `tests/e2e/workflows/conftest.py` runs each scenario once per mode per session.
+  scenario, run it in a mode, read what the run left (irimi's stdout and stderr, its store and
+  its write log), check the invariants, and read `irimi compare`'s rows. `tests/e2e/workflows/conftest.py` runs each scenario once per mode per session.
 - `agents/agentkit.py` is what the agents share: a urllib client, configuration from the
   environment, and the observation log the tests read. `agents/observe.py` wraps the SDK's
   `trigger`, `run`, `read_tool` and `write_tool` to log which runs started and which body ran.

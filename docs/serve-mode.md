@@ -53,7 +53,9 @@ SDK that ignores proxy settings (stripe-python) cannot be shadowed unless it is 
 
 The banner, then one line per exchange and tool call as each finishes (`--quiet` skips these), and
 each run's summary under `--- run <id> ---` when the SDK ends the run: the same block
-`irimi runs show <id>` prints, built from the store once the run's end is on disk. A streamed answer
+`irimi runs show <id>` prints, built from the store once the run's end is on disk. A client that
+refuses irimi's certificate sends no request for a summary to show, so serve warns on stderr
+instead, once per host, naming the CA to point it at. A streamed answer
 is recorded when its stream closes, so a stream the agent leaves open after its run ends is stored
 in the run but missing from the summary already printed. On stop, if any requests named no run,
 irimi prints `stopped · N exchanges not in any run: irimi runs show unattributed`.
@@ -68,7 +70,8 @@ irimi prints `stopped · N exchanges not in any run: irimi runs show unattribute
   left `incomplete`. A proxy that stops on its own exits 2.
 - **One serve per store.** A serve holds `serve.lock` in its store while it runs, and a second
   serve on the same store exits 2 at once. A supervisor's restart succeeds once the old process
-  has exited. `irimi runs rm` and `runs prune` are refused while a serve holds the lock.
+  has exited. `irimi runs rm` and `runs prune` are refused while a serve, or any other irimi
+  process, writes the store.
 - **What it holds in memory**: every run that has not ended, one whose end never reached irimi
   included, and each open run's write log.
 

@@ -1,6 +1,7 @@
-"""The serve lock: one `serve` per store root, as two would repeat `seq`s in `unattributed/`.
+"""The store's locks: one `serve` per root, and no deleting runs while any store writes.
 
-Other processes may share the root; their O_APPEND lines never interleave.
+A second serve would repeat `seq`s in `unattributed/`. Other processes may share the root; their
+O_APPEND lines never interleave.
 """
 
 import fcntl

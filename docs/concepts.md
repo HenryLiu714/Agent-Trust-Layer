@@ -63,7 +63,9 @@ saw it. A faked write's body is one of two kinds:
 **Overlay.** irimi applying the run's faked writes to a live read, so the agent reads back what it
 wrote: a re-read charge shows its new `amount_refunded`, a refunds list shows the faked refund, a
 Slack history shows the faked post. A read the overlay could express only partly is recorded
-`overlay: partial`.
+`overlay: partial`. An error the service sent about the caller or itself (a `401`, a `429`, a
+`5xx`) is never edited into a success: it reaches the agent as sent, recorded `partial`. Only a
+`404` for an object the run minted is answered from the write log.
 
 **Precondition check.** Before faking a write whose route names a `precondition:`, irimi makes one
 real read (**irimi's check read**), applies the run's faked writes to it, and judges whether the
@@ -72,8 +74,8 @@ the service's own error) or `not_evaluable` (irimi could not tell, and fakes the
 reads are counted apart from the agent's reads.
 
 **Write log.** The faked writes of one run, which the overlay and the precondition check apply.
-Each run has its own; it is dropped when the run ends. A rejected write, a retry and an error
-never enter it.
+Each run has its own; it is dropped when the run ends, and a write sent after that is answered
+but not filed. A rejected write, a retry and an error never enter it.
 
 **Retry.** A write repeating an idempotency key the run already used (Stripe's
 `Idempotency-Key`). With the same parameters it gets the first answer again and counts as one

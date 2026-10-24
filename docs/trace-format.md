@@ -67,7 +67,9 @@ by a [body ref](#body-ref). An empty body stores nothing, and its ref is `null`.
   `stream-truncated`; the agent still got every chunk that arrived.
 - **Redaction.** Every value in every record may hold `<redacted:` + 16 hex digits + `>` in place
   of a secret, or `<redaction-failed>` where a part could not be redacted (the exchange is then
-  flagged `redaction-failed`). The rules are in [security.md](security.md#redaction).
+  flagged `redaction-failed`). A name, repr or error the SDK cut before irimi could redact it ends
+  in `<redacted>` where a secret crossed the cut. The rules are in
+  [security.md](security.md#redaction).
 - **Telemetry** bodies are never stored.
 
 ## Records
@@ -117,7 +119,8 @@ A run's or tool call's `error` (`trace.ErrorInfo`):
 | `type` | string | 2 | The exception's `module.qualname`, at most 300 characters. |
 | `message` | string | 2 | Its `str()`, at most 1000 characters. |
 
-Both are redacted whole and only then cut.
+Both are redacted whole and only then cut; a secret across the cut is kept as its placeholder,
+never dropped or split.
 
 ### Captured arguments
 
@@ -151,7 +154,8 @@ part of it was captured by a replayable row:
 - **Importable classes only.** A class defined inside a function, or in `__main__`, cannot be
   imported to rebuild it, so its instances are not replayable.
 - **Depth.** A value inside more than 32 containers is `{"__irimi_repr__": "<too deep>"}`.
-- **Size.** A repr is cut to 1000 characters outside any secret's shape. Captured `args` over 1 MiB
+- **Size.** A repr is cut to 1000 characters outside any secret's shape, and a secret across the
+  cut is marked `<redacted>`. Captured `args` over 1 MiB
   of JSON are replaced whole by `{"__irimi_truncated__": true, "bytes": n}`, where `n` is the size
   capture had reached when it stopped; so is a tool call's `result` when `args` and `result`
   together pass 1 MiB. Neither is replayable.
@@ -306,7 +310,7 @@ know.
 | `delegated` | 2 | A target answered. |
 | `overlay` | 2 | The real service answered, and irimi applied the run's faked writes to the body. |
 | `recording` | 2 | A replay sent again what the service answered the stored run. Other answers a replay takes from the recording keep their recorded value and carry `from-recording`. |
-| `irimi` | 3 | irimi's own error, `{"error": {"type": ..., "message": ...}}`; its flags say why: `refused`, `decision-failed` or `target-failed`. |
+| `irimi` | 3 | irimi's own error, `{"error": {"type": ..., "message": ...}}` (no body for a `HEAD`); its flags say why: `refused`, `decision-failed` or `target-failed`. |
 
 `door` (`exchange.Door`):
 

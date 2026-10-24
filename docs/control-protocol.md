@@ -173,7 +173,8 @@ protocol.
 | an answer the client reads | the Python SDK reads at most 16 MiB |
 
 Text the client cuts before sending is cut before irimi can redact it, so never cut through a
-secret: move the cut to before any key-like token it would split.
+secret: move the cut to before any key-like token it would split. The Python SDK puts
+`<redacted>` there, so a name that is one long key is not posted empty.
 
 ## `Irimi-Run`
 

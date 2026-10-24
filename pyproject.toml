@@ -1,7 +1,7 @@
 [project]
 name = "irimi"
 version = "0.1.0"
-description = "Shadow mode for AI agents: reads are real, writes are virtual, and reads see the writes."
+description = "Shadow mode for AI agents: reads are real, writes are faked, and reads see the writes."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

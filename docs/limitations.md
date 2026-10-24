@@ -20,7 +20,9 @@ all is listed under [known bypasses](security.md#known-bypasses).
 - **No overlay for tools.** A read tool after a write tool's fake reads what was there before;
   nothing applies the fake's write to it.
 - **The overlay models what its effects name.** A read the overlay could express only in part is
-  recorded `overlay: partial`, and the summary's `↳` lines say so; it is never silently wrong.
+  recorded `overlay: partial`, and the summary's `↳` lines say so; it is never silently wrong. A
+  read of a faked object that the service answers with an error other than `404` is passed on as
+  sent, so an agent that retries it sees what it would see in production.
 - **Clients that ignore `SSL_CERT_FILE`** fail TLS under irimi rather than writing for real. The
   summary counts these failures per host and names the CA to point them at.
 

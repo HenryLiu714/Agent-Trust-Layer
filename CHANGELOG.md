@@ -11,7 +11,8 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 
 - **Breaking:** CLI flags are renamed, with no aliases. `--listen-host` is `--bind`,
   `--allow-host` is `--base-url-host`, `--allow-target-host` is `--allow-remote-target`, and
-  `replay --call` is `replay --entrypoint`. Rename them in scripts and compose files.
+  `replay --call` is `replay --entrypoint`. Rename them in scripts and compose files; an old
+  spelling is refused with a hint naming the new one.
 - **Breaking:** abbreviated flags are refused (0.1.0 took `--allow-t` as
   `--allow-target-host`). Spell every flag in full.
 - **Breaking:** `irimi shadow --serve` is removed. Use `irimi serve`.
@@ -84,7 +85,8 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 
 ### Added
 
-- `irimi runs rm RUN...` and `irimi runs prune --older-than DURATION` (with `--dry-run`).
+- `irimi runs rm RUN...` and `irimi runs prune --older-than DURATION` (with `--dry-run`), refused
+  while any irimi process writes the store, so a run in progress is never deleted.
 - `--quiet` on `shadow`, `serve` and `replay` prints only the banner and the summary.
 - `irimi runs list --all`; `runs show`, `compare`, `replay` and `runs rm` take a unique run-id
   prefix or `last`, and `runs show` shows the newest run by default.
@@ -94,7 +96,8 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 - `replay --run=RUN` for a run id that starts with `-`.
 - The summary lists each SDK run an `irimi shadow` process made, with the command that replays it.
 - A summary names connections whose TLS handshake failed because the client did not trust irimi's
-  CA, and says so when a run saw no traffic at all.
+  CA, and says so when a run saw no traffic at all. `irimi serve` warns of such a client on
+  stderr, once per host.
 - A clear error when the port is in use, and a check that the command exists before the banner.
 - A warning when irimi's CA expires within 30 days.
 - The control protocol is versioned: the SDK sends `Irimi-Protocol: 1`, and irimi answers `426` to
@@ -116,7 +119,20 @@ the SDK or the map schema. Each breaking change is marked **Breaking** with how 
 
 - `irimi runs show unattributed` on a store with no unattributed events says so, instead of
   printing an invented run.
-- A tool's name is cut outside any secret it contains.
+- A run's or tool's name, a captured repr and a posted error are cut outside any secret they
+  contain, and a secret across the cut is marked instead of dropped (`<redacted>` where the SDK
+  cuts, the secret's placeholder where the store does), so a value that is one long key is never
+  stored empty.
+- The overlay never edits an error the service sent (a `401`, a `429`, a `5xx`) into a success on
+  a read of an object the run minted; only a `404` is answered from the write log. A write a run
+  sends after it ended, and its idempotency key, are no longer kept.
+- irimi's own answer to a `HEAD` carries no body, so the next response on a kept-alive connection
+  is read whole.
+- A base-URL request whose path starts with `//` names no host and is refused.
+- An argument no command takes is refused with the usage of the command it was typed to, with a
+  hint for `--serve` and for a command typed without its `--`.
+- `irimi runs prune --older-than 0h` is refused; the duration must be positive.
+- Two writes checked at the same time each report their own check read's failure.
 - The Stripe customer fixture has no active discount, and every fixture id is clearly synthetic.
 - A write refused because its body is too large keeps its service and operation in the run.
 - irimi's banner and summary start on a fresh line after a command whose output did not end in one.

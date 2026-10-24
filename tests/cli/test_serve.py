@@ -7,13 +7,16 @@ import contextlib
 import dataclasses
 import json
 import socket
+import ssl
 import sys
+import threading
+import time
 from typing import cast
 
 import pytest
 
 from irimi import cli, servicemaps
-from irimi.cli import compose, main
+from irimi.cli import compose, main, serve
 from irimi.config import ca, paths
 from irimi.core import exitcodes
 from irimi.core.exchange import Exchange
@@ -1176,3 +1179,84 @@ def test_serve_records_under_the_store_it_was_given(home, monkeypatch, capsys):
         for ex in stored.events
     ]
     assert seen == [("/hello", b"hello")]
+
+
+def test_serve_warns_once_per_host_whose_client_refused_irimi_s_ca(tmp_path, monkeypatch, capsys):
+    """Serve warns on stderr, once per host, of a client refusing irimi's CA, naming the CA.
+
+    Such a client never sends a request, so no run's summary can say so."""
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
+    ca.generate_ca(ca.ca_paths())
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    other = ca.CAPaths(key=elsewhere / "ca.key", cert=elsewhere / "ca.pem")
+    ca.generate_ca(other)  # what the client trusts instead
+    engines: list[object] = []
+
+    def build(*args, **kwargs):
+        engines.append(compose.build_engine(*args, **kwargs))
+        return engines[-1]
+
+    args = cli.parse_args(["serve", "--port", "0", "--quiet"])
+    stop = threading.Event()
+    codes: list[int] = []
+    server = threading.Thread(
+        target=lambda: codes.append(serve.cmd_serve(args, stop, engine_factory=build))
+    )
+    server.start()
+    try:
+        port = _listening_port(engines)
+        for _ in range(2):
+            tunnel = _tunnel(port, "api.distrustful.test")
+            context = ssl.create_default_context(cafile=str(other.cert))
+            with pytest.raises(ssl.SSLCertVerificationError):
+                context.wrap_socket(tunnel, server_hostname="api.distrustful.test")
+            tunnel.close()
+        printed = _stderr_once_it_says("failed TLS", capsys)
+    finally:
+        stop.set()
+        server.join(30)
+    assert codes == [exitcodes.OK]
+    warned = [line for line in printed if "failed TLS" in line]
+    assert warned == [
+        "warning: 1 connection to api.distrustful.test failed TLS: the client did not trust "
+        f"irimi's CA; point it at {ca.ca_paths().cert} (some clients ignore SSL_CERT_FILE)"
+    ]
+
+
+def _stderr_once_it_says(
+    text: str, capsys: pytest.CaptureFixture[str], timeout: float = 10
+) -> list[str]:
+    """Return serve's stderr lines until one holds `text`, and for half a second more.
+
+    The extra half second gives a second handshake's report, on the same loop, its time too."""
+    lines: list[str] = []
+    deadline = time.monotonic() + timeout
+    while not any(text in line for line in lines):
+        assert time.monotonic() < deadline, f"serve never said {text!r}"
+        time.sleep(0.05)
+        lines += capsys.readouterr().err.splitlines()
+    time.sleep(0.5)
+    return lines + capsys.readouterr().err.splitlines()
+
+
+def _listening_port(engines: list[object], timeout: float = 30) -> int:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if engines:
+            port = engines[0].listen_port()  # type: ignore[attr-defined]
+            if port is not None:
+                return int(port)
+        time.sleep(0.05)
+    raise AssertionError("serve's proxy never listened")
+
+
+def _tunnel(proxy_port: int, host: str) -> socket.socket:
+    """A CONNECT tunnel through the proxy to `host`:443, before any TLS."""
+    s = socket.create_connection(("127.0.0.1", proxy_port), timeout=10)
+    s.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode())
+    answer = b""
+    while b"\r\n\r\n" not in answer:
+        answer += s.recv(1024)
+    assert answer.startswith(b"HTTP/1.1 200"), answer
+    return s

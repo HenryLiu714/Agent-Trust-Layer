@@ -19,6 +19,7 @@ import pytest
 from irimi.config import files
 from irimi.core import exchange, limits
 from irimi.core.exchange import Exchange, Flag, Response
+from irimi.core.limits import MAX_QUEUED_ERROR
 from irimi.protocol import trace
 from irimi.protocol.trace import (
     ErrorInfo,
@@ -1603,3 +1604,59 @@ def test_null_store_record_and_close_return_none():
     )
     assert store.record(faked) is None  # type: ignore[func-returns-value]
     assert store.close() is None  # type: ignore[func-returns-value]
+
+
+KEY = b"k" * 32
+
+
+LONG_KEY = "sk_live_" + "a" * (2 * MAX_QUEUED_ERROR)
+
+
+def test_a_run_s_end_whose_error_is_one_long_key_is_stored_as_its_placeholder(tmp_path):
+    """An end's error that is one long key is stored as its placeholder, never empty.
+
+    The error waits cut before it is redacted; a key across the cut is hidden there, not dropped."""
+    store = DirectoryStore(tmp_path / "store", KEY)
+    store.start_run(RunRecord.process("ended01", ("python3",), None, 1.0))
+    store.end_run("ended01", 2.0, "error", ErrorInfo(LONG_KEY, LONG_KEY), 1)
+    store.close()
+    end = StoreReader(tmp_path / "store").load_run("ended01").record.end
+    assert end is not None and end.error is not None
+    hidden = redact.placeholder(KEY, LONG_KEY)
+    assert (end.error.type, end.error.message) == (hidden, hidden)
+
+
+def test_an_end_s_error_is_a_prefix_of_its_redacted_whole_when_a_key_crosses_the_cut(tmp_path):
+    store = DirectoryStore(tmp_path / "store", KEY)
+    store.start_run(RunRecord.process("ended02", ("python3",), None, 1.0))
+    message = f"refused {LONG_KEY} today"
+    store.end_run("ended02", 2.0, "error", ErrorInfo("Boom", message), 1)
+    store.close()
+    end = StoreReader(tmp_path / "store").load_run("ended02").record.end
+    assert end is not None and end.error is not None
+    whole = redact.redact_error(ErrorInfo("Boom", message), KEY)
+    assert whole is not None
+    assert end.error.message == f"refused {redact.placeholder(KEY, LONG_KEY)}"
+    assert whole.message.startswith(end.error.message)
+
+
+@pytest.mark.parametrize("fails", ["write", "claim"])
+def test_a_run_s_end_is_announced_even_when_it_cannot_be_written(tmp_path, monkeypatch, fails):
+    """A run's end is announced even when it cannot be written, so its write log and keys go.
+
+    A full disk, or a replay's store that may not write the run, would keep them all serve long."""
+    ended: list[str] = []
+    root = tmp_path / "store"
+    replay_of = "recorded1" if fails == "claim" else None
+    store = DirectoryStore(root, KEY, on_run_ended=ended.append, replay_of=replay_of)
+    if fails == "write":
+
+        def refuse(*args: object, **kwargs: object) -> None:
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(writer, "write_private", refuse)
+    # A replay's store never writes the run it replays.
+    store.end_run("recorded1" if fails == "claim" else "full0001", 2.0, "ok")
+    store.close()
+    assert ended == ["recorded1" if fails == "claim" else "full0001"]
+    assert store.stats().dropped == 1

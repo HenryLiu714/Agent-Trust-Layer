@@ -404,3 +404,14 @@ def test_stripe_python_raises_idempotency_error_on_the_conflict_body():
     raised = _APIRequestor().specific_v1_api_error(raw, ans.response.status, raw, {}, error)
     assert isinstance(raised, stripe.IdempotencyError)
     assert raised.http_status == 400
+
+
+def test_a_key_sent_after_its_run_ended_is_kept_by_no_run():
+    store = Store()
+    first = builders.first_answer()
+    store.end_run(SLOT[0])
+    store.put(SLOT, builders.REFUND_PARAMS, first)
+    assert store.get(SLOT, builders.REFUND_PARAMS) == (None, False)
+    other = ("9b2c", *SLOT[1:])
+    store.put(other, builders.REFUND_PARAMS, first)
+    assert store.get(other, builders.REFUND_PARAMS) == (first, False)

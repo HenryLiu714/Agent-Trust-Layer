@@ -2,7 +2,9 @@
 
 from dataclasses import replace
 
-from irimi.core.exchange import clip_chunks, media_type
+import pytest
+
+from irimi.core.exchange import Response, clip_chunks, header_value, media_type, without_header
 from tests.support import builders
 
 
@@ -143,3 +145,12 @@ def test_an_exchange_never_ends_before_it_started():
     """The wall clock can step back mid-exchange; a stored run's reader subtracts the two."""
     ex = builders.exchange(response=None, started_at=2.25, ended_at=1.5)
     assert (ex.started_at, ex.ended_at) == (2.25, 2.25)
+
+
+@pytest.mark.parametrize("name", ["irimi-answered-by", "Irimi-Answered-By", "IRIMI-ANSWERED-BY"])
+def test_a_header_is_found_and_removed_however_its_name_is_spelled(name: str) -> None:
+    headers = (("Irimi-Answered-By", "irimi"), ("content-type", "application/json"))
+    assert header_value(headers, name) == "irimi"
+    assert without_header(headers, name) == (("content-type", "application/json"),)
+    response = Response(200, headers, b"{}")
+    assert response.without_header(name).headers == (("content-type", "application/json"),)

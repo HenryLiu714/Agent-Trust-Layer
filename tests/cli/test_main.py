@@ -2,6 +2,8 @@
 
 import argparse
 import io
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -614,3 +616,138 @@ def test_serve_and_shadow_print_the_same_startup_lines(monkeypatch):
     """One function prints both, so a line added for one is added for both, flushed alike."""
     source = "".join(py.read_text() for py in Path(cli.__file__).parent.glob("*.py"))
     assert source.count("print_startup(") == 3  # the definition plus one call each
+
+
+# ------------------------------------------------- refusals, with the command's own usage
+
+
+def _refusal(argv: list[str], capsys: pytest.CaptureFixture[str]) -> list[str]:
+    """Return the usage line and every line from the error on that `irimi <argv>` exits 2 with."""
+    with pytest.raises(SystemExit) as exit_:
+        main(argv)
+    assert exit_.value.code == exitcodes.ERROR
+    lines = capsys.readouterr().err.splitlines()
+    error = next(i for i, line in enumerate(lines) if ": error: " in line)
+    return [lines[0], *lines[error:]]
+
+
+@pytest.mark.parametrize(
+    ("argv", "old", "new"),
+    [
+        (["shadow", "--listen-host", "0.0.0.0", "--", "true"], "--listen-host", "--bind"),
+        (["serve", "--allow-host", "x.test"], "--allow-host", "--base-url-host"),
+        (
+            ["shadow", "--allow-target-host=x.test", "--", "true"],
+            "--allow-target-host",
+            "--allow-remote-target",
+        ),
+        (["replay", "last", "--call", "agent:handle"], "--call", "--entrypoint"),
+    ],
+)
+def test_a_renamed_flag_is_refused_by_its_command_with_the_name_to_use(
+    argv, old, new, capsys, tmp_path
+):
+    err = _refusal(argv, capsys)
+    assert err[0].startswith(f"usage: irimi {argv[0]} ")
+    assert err[1].startswith(f"irimi {argv[0]}: error: unrecognized arguments: {old}")
+    assert err[2:] == [f"hint: {old} is spelled {new}"]
+    assert not (tmp_path / "irimi-home" / "store").exists()
+
+
+def test_shadow_serve_is_refused_with_a_pointer_at_irimi_serve(capsys):
+    err = _refusal(["shadow", "--serve"], capsys)
+    assert err[1:] == [
+        "irimi shadow: error: unrecognized arguments: --serve",
+        "hint: serve mode is its own command: irimi serve",
+    ]
+
+
+@pytest.mark.parametrize("command", ["shadow", "replay last"])
+def test_a_command_typed_without_its_dashes_is_refused_with_where_they_go(command, capsys):
+    words = command.split()
+    err = _refusal([*words, "--quiet", "python3", "agent.py"], capsys)
+    assert err[1:] == [
+        f"irimi {words[0]}: error: unrecognized arguments: python3 agent.py",
+        "hint: put the command to run after --",
+    ]
+
+
+def test_an_abbreviated_flag_is_refused_by_the_subcommand_it_was_typed_to(capsys):
+    """`irimi runs` runs `runs list`, so its refusal shows `runs list`'s usage."""
+    err = _refusal(["runs", "--lim", "1"], capsys)
+    assert err[0].startswith("usage: irimi runs list ")
+    assert err[1:] == ["irimi runs list: error: unrecognized arguments: --lim 1"]
+
+
+def test_words_after_dashes_on_a_command_that_runs_none_are_refused_by_that_command(capsys):
+    err = _refusal(["runs", "show", "last", "--", "x"], capsys)
+    assert err[1:] == ["irimi runs show: error: unrecognized arguments: -- x"]
+
+
+def _every_parser(parser: argparse.ArgumentParser) -> list[argparse.ArgumentParser]:
+    found = [parser]
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for sub in action.choices.values():
+                found += _every_parser(sub)
+    return found
+
+
+def test_no_parser_accepts_an_abbreviated_flag():
+    parsers = _every_parser(cli.build_parser())
+    assert len(parsers) == 13
+    assert [p.prog for p in parsers if p.allow_abbrev] == []
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["shadow", "--bin=0.0.0.0", "--", "true"],
+        ["shadow", "--allow-remote", "x.test", "--", "true"],
+        ["replay", "--entry=a:b", "last"],
+        ["runs", "list", "--lim=1"],
+    ],
+)
+def test_an_abbreviation_is_refused_with_or_without_an_equals_sign(argv, capsys):
+    err = _refusal(argv, capsys)
+    assert "error: unrecognized arguments:" in err[1]
+
+
+def test_an_abbreviated_required_flag_does_not_count_as_given(capsys):
+    err = _refusal(["runs", "prune", "--older=1d"], capsys)
+    assert err[1:] == [
+        "irimi runs prune: error: the following arguments are required: --older-than"
+    ]
+
+
+def test_replay_offers_no_run_it_refuses(capsys):
+    """Replay's help never offers `unattributed`, which it refuses; the pool's readers offer it."""
+    for argv, offers in (
+        (["replay", "--help"], False),
+        (["runs", "show", "--help"], True),
+        (["runs", "rm", "--help"], True),
+        (["compare", "--help"], True),
+    ):
+        with pytest.raises(SystemExit):
+            main(argv)
+        said = " ".join(capsys.readouterr().out.split())
+        assert ("unattributed for traffic no run claimed" in said) is offers, argv
+
+
+@pytest.mark.parametrize("command", [["shadow", "--", "true"], ["runs", "list"]])
+def test_a_command_run_with_its_stdout_closed_runs_without_a_traceback(command, tmp_path):
+    """`irimi shadow -- agent >&-` leaves Python no stdout at all, which is no terminal either."""
+    env = {**os.environ, paths.IRIMI_HOME_ENV: str(tmp_path / "home")}
+    env.pop(paths.IRIMI_STORE_ENV, None)
+    irimi = [sys.executable, "-m", "irimi"]
+    subprocess.run([*irimi, "init"], env=env, capture_output=True, check=True)
+    done = subprocess.run(
+        [*irimi, *command],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        preexec_fn=lambda: os.close(1),  # the child closes its own stdout
+        check=False,
+    )
+    assert (done.returncode, done.stderr) == (exitcodes.OK, "")

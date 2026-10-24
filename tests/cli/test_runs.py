@@ -16,11 +16,13 @@ import pytest
 from irimi import servicemaps
 from irimi.cli import main
 from irimi.cli.runs import DEFAULT_RUNS_LIMIT
+from irimi.config import paths
 from irimi.core.exchange import Exchange, Precondition, Request, Response
 from irimi.protocol import trace
 from irimi.protocol.trace import ErrorInfo, RunRecord, ToolCall, Trigger
 from irimi.record import redact
-from irimi.record.store.lock import ServeLock
+from irimi.record.store import retention
+from irimi.record.store.lock import ServeLock, StoreBusy, WriterLock
 from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
 from irimi.report.model import RunView
@@ -945,3 +947,121 @@ def test_runs_prune_refuses_a_duration_that_is_not_whole_hours_or_days(older_tha
         main(["runs", "prune", f"--older-than={older_than}"])
     assert exited.value.code == 2
     assert "give a positive whole number of hours or days, as 12h or 30d" in capsys.readouterr().err
+
+
+# ----------------------------------------------- no deleting while an irimi process writes
+
+
+@pytest.mark.parametrize("older_than", ["0h", "0d", "00h"])
+def test_prune_refuses_a_duration_of_nothing(older_than, tmp_path, capsys):
+    """Every run, the one still starting included, is older than no time at all."""
+    store = tmp_path / "store"
+    argv = ["runs", "prune", "--store", str(store), "--older-than", older_than]
+    with pytest.raises(SystemExit) as exited:
+        main(argv)
+    assert exited.value.code == 2
+    assert capsys.readouterr().err.splitlines()[-1] == (
+        f"irimi runs prune: error: argument --older-than: {older_than!r}: give a positive whole "
+        "number of hours or days, as 12h or 30d"
+    )
+    assert not store.exists()
+
+
+def _refund_at(run_id: str, started_at: float) -> Exchange:
+    request = Request(
+        "POST",
+        "https",
+        "api.stripe.com",
+        443,
+        "/v1/refunds",
+        "",
+        (("content-type", "application/x-www-form-urlencoded"),),
+        f"charge=ch_{run_id}&amount=4900&currency=usd".encode(),
+    )
+    return Exchange(
+        request,
+        Response(200, (), b"{}"),
+        "stripe",
+        "refunds.create",
+        "write",
+        "fake-L1",
+        run_id,
+        started_at=started_at,
+        ended_at=started_at + 0.1,
+    )
+
+
+def _open_store(home: Path) -> DirectoryStore:
+    return DirectoryStore(home / paths.STORE_DIR_NAME, redact.load_key(home))
+
+
+def _written(store: DirectoryStore) -> None:
+    """Wait for the writer to take everything queued."""
+    deadline = time.monotonic() + 10
+    while store.stats().queued and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.05)
+
+
+def test_runs_rm_never_deletes_a_run_another_process_is_writing(home, capfd):
+    """`irimi shadow` takes no `serve.lock`: its run has not ended, and `last` names it."""
+    store = _open_store(home)
+    root = home / paths.STORE_DIR_NAME
+    store.start_run(RunRecord.process("live0001", ("python3", "agent.py"), None, time.time()))
+    store.record(_refund_at("live0001", time.time()))
+    _written(store)
+    try:
+        assert main(["runs", "rm", "last"]) == 2
+        assert capfd.readouterr() == (
+            "",
+            f"error: another irimi process is writing the trace store {root}; "
+            "stop it to delete runs\n",
+        )
+        assert (root / "runs" / "live0001" / "events.jsonl").is_file()
+    finally:
+        store.close()
+    assert main(["runs", "rm", "live0001"]) == 0
+    assert capfd.readouterr().out.splitlines()[0] == "deleted run live0001"
+    assert not (root / "runs" / "live0001").exists()
+
+
+def test_runs_prune_never_deletes_an_idle_run_in_progress(home, capfd):
+    """A run idle for longer than `--older-than` but not ended is in progress, and is kept."""
+    store = _open_store(home)
+    root = home / paths.STORE_DIR_NAME
+    long_ago = time.time() - 3 * 86400
+    store.start_run(RunRecord.process("idle0001", ("python3", "agent.py"), None, long_ago))
+    store.record(_refund_at("idle0001", long_ago))
+    _written(store)
+    run_dir = root / "runs" / "idle0001"
+    for name in ("run.json", "events.jsonl"):
+        os.utime(run_dir / name, (long_ago, long_ago))
+    try:
+        for dry_run in ([], ["--dry-run"]):
+            assert main(["runs", "prune", "--older-than", "1d", *dry_run]) == 2
+            assert "another irimi process is writing" in capfd.readouterr().err
+        assert run_dir.is_dir()
+        assert len(list((root / "blobs").iterdir())) == 2
+    finally:
+        store.close()
+    for name in ("run.json", "events.jsonl"):
+        os.utime(run_dir / name, (long_ago, long_ago))
+    assert main(["runs", "prune", "--older-than", "1d"]) == 0
+    assert capfd.readouterr().out.splitlines()[0] == "deleted run idle0001"
+
+
+def test_a_store_waits_for_a_removal_and_removal_waits_for_no_store(tmp_path):
+    """The writer lock is shared among stores and exclusive to a removal."""
+    root = tmp_path / "store"
+    root.mkdir()
+    one, two = WriterLock.share(root), WriterLock.share(root)
+    with pytest.raises(StoreBusy):
+        WriterLock.exclude(root)
+    one.release()
+    two.release()
+    two.release()  # idempotent
+    removing = WriterLock.exclude(root)
+    with pytest.raises(StoreBusy):
+        retention.remove(root, [])
+    removing.release()
+    assert retention.remove(root, []) == retention.Removal((), ())

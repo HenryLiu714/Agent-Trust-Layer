@@ -19,13 +19,14 @@ from irimi.decide.policy import ShadowPolicy
 from irimi.engine import Serve
 from irimi.engine.control import MAX_REFUSAL, TOO_DEEP, ControlEndpoint
 from irimi.protocol import control as protocol_control
+from irimi.protocol import trace
 from irimi.protocol.trace import MAX_QUOTED, ErrorInfo, JSONValue, ToolCall, Trigger
 from irimi.record import redact
 from irimi.record.store.reader import StoreReader
 from irimi.record.store.writer import DirectoryStore
 from irimi.replay.index import ReplayIndex
 from irimi.replay.policy import ReplayPolicy
-from tests.support.doubles import NullStore
+from tests.support.doubles import KeptStore, NullStore
 from tests.support.engine import engine_config, start_engine, via_proxy
 from tests.support.waiting import eventually
 
@@ -816,3 +817,27 @@ def test_a_body_nested_too_deeply_to_read_is_a_400_never_a_500(
     assert [r for r in caplog.records if r.name == "irimi.engine.control"] == []
     engine.finish()
     assert not (engine.root / "runs").exists() and engine.tool_calls == []
+
+
+def test_a_tool_call_posted_without_awaited_is_refused_and_the_sdk_always_sends_it() -> None:
+    """A tool call posted without `awaited` is refused 400, naming it; the SDK always sends it.
+
+    Every SDK version posts it, so only a hand-made post can lack it."""
+    call = ToolCall("tc1", "run1", "m:f", "write", "shadow", {}, None, None, 1.0, 2.0)
+    posted = trace.tool_call_to_json(call)
+    assert posted["awaited"] is False
+    del posted["run_id"], posted["awaited"]
+    request = Request(
+        "POST",
+        "http",
+        "127.0.0.1",
+        4000,
+        "/_irimi/runs/run1/tool-calls",
+        "",
+        (),
+        json.dumps(posted).encode(),
+    )
+    store = KeptStore()
+    answer = ControlEndpoint(store, serve=False).answer(request)
+    assert answer.status == 400 and store.calls == []
+    assert json.loads(answer.body)["error"]["message"] == "missing required field 'awaited'"

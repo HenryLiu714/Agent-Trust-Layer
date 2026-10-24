@@ -3,6 +3,8 @@
 import json
 from dataclasses import replace
 
+import pytest
+
 from irimi.core import bodies
 from irimi.core.exchange import Exchange, Response
 from irimi.core.limits import MAX_BODY_BYTES
@@ -128,3 +130,25 @@ def test_a_body_over_the_size_cap_is_not_a_json_object():
     padded = json.dumps({"description": "x" * MAX_BODY_BYTES}).encode()
     assert bodies.json_object(padded) is None
     assert bodies.json_object(b'{"ok": true}') == {"ok": True}
+
+
+def test_a_write_sent_after_its_run_ended_is_filed_under_no_run():
+    log = writelog.WriteLog()
+    write = _write()
+    log.add(write)
+    log.end_run(write.run_id)
+    log.add(write)
+    assert log.for_run(write.run_id) == ()
+    other = replace(_write(), run_id="run-b")
+    log.add(other)
+    assert log.for_run("run-b") == (other,)
+
+
+def test_the_ended_runs_remembered_are_bounded_newest_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(writelog, "MAX_ENDED_RUNS", 3)
+    ended = writelog.EndedRuns()
+    for run_id in ("a", "b", "c", "a", "d"):
+        ended.add(run_id)
+    assert [run_id in ended for run_id in "abcd"] == [True, False, True, True]

@@ -3,6 +3,8 @@
 import json
 from dataclasses import replace
 
+import pytest
+
 from irimi import services
 from irimi.core.exchange import Exchange, Request, Response
 from irimi.core.limits import MAX_BODY_BYTES
@@ -439,3 +441,63 @@ def test_no_overlay_rewrite_translates_nothing():
         NoOverlay().rewrite(write_log=[_FAKED], classification=classify(req), read_request=req)
         is None
     )
+
+
+# ---------------------------------------------- errors on a read of an object the run minted
+
+
+def _answered(status: int, document) -> Response:
+    return Response(status, (("content-type", "application/json"),), json.dumps(document).encode())
+
+
+@pytest.mark.parametrize(
+    ("status", "document"),
+    [
+        (429, {"message": "slow down"}),
+        (503, {}),
+        (401, {"error": {"code": "resource_missing"}}),
+        (500, {"error": {"type": "api_error"}}),
+    ],
+)
+def test_a_minted_refunds_read_keeps_an_error_that_is_not_not_found(status, document):
+    """A minted refund's 429, 401 or 5xx is left as sent, `partial`: only a 404 is overlaid.
+
+    A rate limit, a bad key or an outage would have reached the agent for a real refund too."""
+    upstream = _answered(status, document)
+    out = _Overlay()([_write_exchange()], _read(f"/v1/refunds/{MINTED}"), upstream)
+    assert out.response.status == status
+    assert json.loads(out.response.body) == document
+    assert out.fidelity == "partial"
+
+
+def test_a_minted_refunds_not_found_is_still_answered_with_the_refund():
+    upstream = _answered(404, {"error": {"code": "resource_missing"}})
+    out = _Overlay()([_write_exchange()], _read(f"/v1/refunds/{MINTED}"), upstream)
+    assert out.response.status == 200
+    assert json.loads(out.response.body)["id"] == MINTED
+    assert out.fidelity == "full"
+
+
+THREAD_TS = "1800000000.000001"
+
+
+def _replies_read():
+    return _slack_read({"channel": "C0123", "ts": THREAD_TS}, operation="conversations.replies")
+
+
+@pytest.mark.parametrize("status", [429, 500])
+def test_a_minted_threads_read_is_not_made_ok_under_an_error_status(status):
+    """Slack answers `thread_not_found` at 200; the same body at a 429 or a 5xx is not that."""
+    error = {"ok": False, "error": "thread_not_found"}
+    out = _Overlay()([_slack_post_exchange(THREAD_TS)], _replies_read(), _answered(status, error))
+    assert out.response.status == status
+    assert json.loads(out.response.body) == error
+    assert out.fidelity == "partial"
+
+
+def test_a_minted_threads_not_found_at_200_is_still_the_thread():
+    error = {"ok": False, "error": "thread_not_found"}
+    out = _Overlay()([_slack_post_exchange(THREAD_TS)], _replies_read(), _answered(200, error))
+    assert out.response.status == 200
+    assert json.loads(out.response.body)["ok"] is True
+    assert out.fidelity == "full"

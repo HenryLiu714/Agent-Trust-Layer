@@ -32,3 +32,17 @@ class NullStore:
 
     def close(self) -> None:
         return None
+
+
+class KeptStore(NullStore):
+    """A RunStore that keeps the exchanges and tool calls it is handed."""
+
+    def __init__(self) -> None:
+        self.exchanges: list[Exchange] = []
+        self.calls: list[ToolCall] = []
+
+    def record(self, exchange: Exchange) -> None:
+        self.exchanges.append(exchange)
+
+    def record_tool_call(self, call: ToolCall) -> None:
+        self.calls.append(call)

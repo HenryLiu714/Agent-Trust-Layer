@@ -4,6 +4,7 @@ import asyncio
 import http.client
 import json
 import socket
+from pathlib import Path
 
 import pytest
 
@@ -11,7 +12,7 @@ from irimi.config import ca, paths
 from irimi.core.exchange import Response
 from irimi.decide.overlay import NoOverlay, Overlaid
 from irimi.decide.policy import ShadowPolicy
-from irimi.engine import EngineStartError
+from irimi.engine import EngineConfig, EngineStartError
 from irimi.engine.mitm import MitmEngine
 from tests.support.doubles import NullStore
 from tests.support.engine import engine_config, start_engine, via_proxy
@@ -315,3 +316,30 @@ def test_live_read_carries_no_fidelity_flag(engine, upstream):
     via_proxy(eng.listen_port(), "GET", f"http://127.0.0.1:{upstream}/hello")
     assert seen[0].answered_by == "live"
     assert seen[0].flags == ()
+
+
+@pytest.mark.parametrize(
+    ("cause", "said"),
+    [
+        (
+            OSError(13, "http(s) proxy failed to listen on 127.0.0.1:1 with [Errno 13] denied"),
+            "could not listen on 127.0.0.1:1: permission denied",
+        ),
+        (
+            OSError("http(s) proxy failed to listen: [Errno None] no route"),
+            "could not listen on 127.0.0.1:1",
+        ),
+        (None, "could not listen on 127.0.0.1:1"),
+        (RuntimeError("loop closed"), "could not listen on 127.0.0.1:1: loop closed"),
+    ],
+)
+def test_a_listener_that_did_not_bind_is_told_in_irimi_s_words(
+    cause: BaseException | None, said: str
+) -> None:
+    """mitmproxy's strerror is its own sentence; only the OS's reason for the errno is irimi's."""
+    from irimi.engine.mitm import _start_failure
+
+    config = EngineConfig(
+        run_id="t3st", ca=ca.ca_paths(), confdir=Path("."), listen_host="127.0.0.1", listen_port=1
+    )
+    assert _start_failure(config, cause) == said

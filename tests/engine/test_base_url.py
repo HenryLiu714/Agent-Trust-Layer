@@ -1,15 +1,26 @@
 """Base-URL mode, for SDKs that ignore proxy settings: requests addressed to the listener."""
 
+import asyncio
 import json
 import socket
+import threading
+from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 
+from irimi.config import ca, paths
 from irimi.core import exchange
-from irimi.core.exchange import Flag
+from irimi.core.exchange import Flag, Request
+from irimi.decide.overlay import NoOverlay
+from irimi.decide.policy import ShadowPolicy
+from irimi.engine import EngineConfig
+from irimi.engine.ingress import ReverseDoorRefused, rewrite_reverse
+from irimi.engine.mitm import MitmEngine
 from irimi.protocol.trace import RunRecord
 from irimi.report import model, summary
 from irimi.report.model import RunView
+from tests.support.doubles import KeptStore
 from tests.support.engine import (
     engine_config,
     leaf_cert_for_loopback,
@@ -179,3 +190,90 @@ def test_a_base_url_request_without_a_host_header_gets_one(tmp_path, monkeypatch
     assert len(seen) == 1
     assert seen[0].door == "reverse"
     assert ("host", "127.0.0.1:1") in seen[0].request.headers
+
+
+# ------------------------------------------- a refusal on a connection that is kept alive
+
+
+@pytest.fixture
+def kept_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[int, KeptStore]]:
+    monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path))
+    p = ca.ca_paths()
+    ca.generate_ca(p)
+    config = EngineConfig(
+        run_id="t3st", ca=p, confdir=paths.mitm_dir(), listen_host="127.0.0.1", listen_port=0
+    )
+    store = KeptStore()
+    eng = MitmEngine(config, ShadowPolicy(), store, NoOverlay())
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=lambda: loop.run_until_complete(eng.run()), daemon=True)
+    thread.start()
+    asyncio.run_coroutine_threadsafe(eng.wait_ready(), loop).result(timeout=15)
+    port = eng.listen_port()
+    assert port is not None
+    yield port, store
+    eng.shutdown()
+    thread.join(timeout=15)
+    loop.close()
+
+
+def _two_on_one_connection(port: int, first: str, then: Callable[[str], str]) -> bytes:
+    """Send `first`, then `then(host)`, on one connection; return all read until the health JSON."""
+    host = f"127.0.0.1:{port}"
+    sent = first.replace("{host}", host) + then(host)
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.sendall(sent.encode())
+        received = b""
+        while not (b"engine_version" in received and received.endswith(b"}")):
+            chunk = sock.recv(65536)
+            assert chunk, f"the connection closed after {received!r}"
+            received += chunk
+    return received
+
+
+def _health(host: str) -> str:
+    return f"GET /_irimi/health HTTP/1.1\r\nhost: {host}\r\n\r\n"
+
+
+def test_a_refused_head_gets_no_body_and_the_connection_stays_usable(
+    kept_engine: tuple[int, KeptStore],
+) -> None:
+    """A refused base-URL HEAD gets a 403 with no content or Content-Length, recorded as sent.
+
+    Its JSON would be read as the start of the connection's next response."""
+    port, store = kept_engine
+    received = _two_on_one_connection(
+        port, "HEAD /evil.example.com/x HTTP/1.1\r\nhost: {host}\r\n\r\n", _health
+    )
+    head, rest = received.split(b"\r\n\r\n", 1)
+    assert head.startswith(b"HTTP/1.1 403 ")
+    assert b"\r\nirimi-answered-by: irimi" in head
+    assert b"content-length" not in head.lower()
+    assert rest.startswith(b"HTTP/1.1 200 ")
+    (refused,) = store.exchanges
+    assert refused.request.method == "HEAD"
+    assert refused.answered_by == "irimi"
+    assert refused.response is not None and refused.response.body == b""
+
+
+def test_a_refused_get_still_carries_its_json(kept_engine: tuple[int, KeptStore]) -> None:
+    """Only HEAD loses its content: a GET's refusal says why."""
+    port, store = kept_engine
+    received = _two_on_one_connection(
+        port, "GET /evil.example.com/x HTTP/1.1\r\nhost: {host}\r\n\r\n", _health
+    )
+    head, rest = received.split(b"\r\n\r\n", 1)
+    assert head.startswith(b"HTTP/1.1 403 ")
+    body, _, after = rest.partition(b"HTTP/1.1 200 ")
+    assert json.loads(body)["error"]["type"] == "irimi_refused"
+    assert after
+    (refused,) = store.exchanges
+    assert refused.response is not None and json.loads(refused.response.body)["error"]
+
+
+@pytest.mark.parametrize("path", ["/", "//v1/charges", "///api.stripe.com/v1/charges"])
+def test_a_base_url_path_whose_first_segment_is_empty_names_no_host(path: str) -> None:
+    """Only the one leading slash is taken off: `//v1/charges` is not the host `v1`."""
+    request = Request("POST", "http", "127.0.0.1", 4000, path, "", (), b"")
+    with pytest.raises(ReverseDoorRefused, match="path must be /<upstream-host>/<path>"):
+        rewrite_reverse(request, frozenset({"v1", "api.stripe.com"}))

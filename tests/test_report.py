@@ -6,7 +6,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from irimi.core.exchange import Flag, Precondition
+import pytest
+
+from irimi.cli.compose import maps_for_stored_runs
+from irimi.core.exchange import Exchange, Flag, Precondition, Request, Response
 from irimi.core.netaddr import Target
 from irimi.protocol.trace import ErrorInfo, RunRecord
 from irimi.report import model, summary
@@ -1344,3 +1347,62 @@ def test_the_summary_s_blocks_come_in_order():
         "",
         "  2 exchanges · 1 real · 1 answered by irimi (1 faked write) · 0 sent to targets",
     ]
+
+
+REFUND_FORM = (("content-type", "application/x-www-form-urlencoded"),)
+
+
+def _refund_checked_at_once(charge: str, started_at: float, ended_at: float) -> Exchange:
+    body = f"charge={charge}&amount=500&currency=usd".encode()
+    return Exchange(
+        Request("POST", "https", "api.stripe.com", 443, "/v1/refunds", "", REFUND_FORM, body),
+        Response(200, (), b"{}"),
+        "stripe",
+        "refunds.create",
+        "write",
+        "fake-L1",
+        "run1",
+        precondition=Precondition("not_evaluable"),
+        would_fire=(f"refund.created.{charge}",),
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+
+
+def _check_read_at(charge: str, status: int, started_at: float) -> Exchange:
+    path = f"/v1/charges/{charge}"
+    return Exchange(
+        Request("GET", "https", "api.stripe.com", 443, path, "", (), b""),
+        Response(status, (), b"{}"),
+        "stripe",
+        "charges.retrieve",
+        "read",
+        "live",
+        "run1",
+        issued_by="engine",
+        started_at=started_at,
+        ended_at=started_at + 0.01,
+    )
+
+
+@pytest.mark.parametrize("a_checked_first", [True, False])
+def test_two_writes_checked_at_once_each_take_their_own_check_read(a_checked_first):
+    """Writes decided at once each take their own check read, in either order (429, then 401)."""
+    a_at, b_at = (1.1, 1.2) if a_checked_first else (1.2, 1.1)
+    events = sorted(
+        [_check_read_at("ch_A1", 429, a_at), _check_read_at("ch_B2", 401, b_at)],
+        key=lambda e: e.started_at,
+    )
+    events += [
+        _refund_checked_at_once("ch_A1", 1.0, 2.0),
+        _refund_checked_at_once("ch_B2", 1.05, 2.1),
+    ]
+    lines = summary.summary_lines(RunView(RunRecord.header("run1"), events), maps_for_stored_runs())
+    writes = [line.strip() for line in lines if "refund $5.00" in line]
+    assert writes == [
+        "○ stripe  refund $5.00 on ch_A1  faked; could not check: "
+        "stripe answered irimi's check read with 429",
+        "○ stripe  refund $5.00 on ch_B2  faked; could not check: "
+        "stripe answered irimi's check read with 401",
+    ]
+    assert "  would have fired: refund.created.ch_A1" in lines

@@ -31,6 +31,7 @@ from irimi.protocol.env import AGENT_VERSION_ENV, CONTROL_ENV, ENGINE_ACTIVE_ENV
 from irimi.protocol.trace import ErrorInfo, Trigger
 from irimi.sdk import _capture as capture
 from irimi.sdk import _control_client as client
+from irimi.sdk import _runs
 from irimi.sdk import _runs as runs
 from irimi.sdk._state import state
 from tests.support.engine import via_proxy
@@ -1211,3 +1212,68 @@ def test_the_public_api_is_exactly_the_documented_names():
 def test_importing_the_sdk_imports_no_mitmproxy():
     code = "import irimi.sdk, sys; assert not [m for m in sys.modules if m.startswith('mitmproxy')]"
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+_PACKAGE_MAIN = """\
+from irimi import sdk
+from irimi.protocol import entrypoints
+
+@sdk.trigger
+def handle() -> None: ...
+
+print(entrypoints.entrypoint(handle.__wrapped__))
+"""
+
+
+def test_a_trigger_in_a_package_s_main_is_warned_of_without_sending_the_user_to_python_m(
+    tmp_path,
+):
+    """A trigger in `pkg/__main__.py` records `__main__`, and the warning does not say `python -m`.
+
+    A replay must not import `__main__.py` again: it would run the agent's whole main."""
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "__main__.py").write_text(_PACKAGE_MAIN)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("IRIMI_")}
+    env[ENGINE_ACTIVE_ENV] = "1"
+    done = subprocess.run(
+        [sys.executable, "-m", "pkg"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout == "__main__:handle\n"
+    assert done.stderr == (
+        "irimi: trigger handle is defined in __main__, which a replay cannot import, so its runs "
+        "cannot be replayed by entrypoint; define it in a module and start the agent with "
+        "python -m <module>\n"
+    )
+
+
+def test_a_name_that_is_one_long_key_is_posted_marked_not_empty():
+    """A name or message that is one long key is posted as CUT_MARK: not empty, and no key.
+
+    The SDK cuts before irimi redacts, with no key to make a placeholder."""
+    key = "sk_live_" + "k" * (2 * limits.MAX_POSTED_MESSAGE)
+    assert _runs.label(_named, key, "@sdk.read_tool") == secret_shapes.CUT_MARK
+    assert ErrorInfo.from_exception(ValueError(key)).message == secret_shapes.CUT_MARK
+    for limit in (len(secret_shapes.CUT_MARK), 50):
+        cut = secret_shapes.cut_marking_secrets("ok " + key, limit)
+        assert len(cut) <= limit and "kkk" not in cut
+
+
+def _named() -> None: ...
+
+
+@pytest.mark.parametrize("limit", range(len(secret_shapes.CUT_MARK) + 2))
+def test_a_cut_too_short_for_its_mark_stays_within_its_limit(limit):
+    """A limit with no room for the mark drops the key unmarked: the cut never runs past it."""
+    key = "sk_live_" + "k" * 40
+    for text in (key, "a " + key, "abcdefghijkl " + key):
+        cut = secret_shapes.cut_marking_secrets(text, limit)
+        assert len(cut) <= limit and "sk_live" not in cut, (text, cut)
+        assert cut == text[: len(cut)] or cut.endswith(secret_shapes.CUT_MARK)

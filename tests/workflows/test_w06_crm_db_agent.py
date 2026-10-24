@@ -21,6 +21,7 @@ from examples.workflows.w06_crm_db_agent.agent import (
 )
 from examples.workflows.w06_crm_db_agent.scenarios import STALE_REPLAY_RUN
 from irimi.core.limits import MAX_ERROR_MESSAGE
+from irimi.core.secret_shapes import CUT_MARK
 from irimi.protocol.trace import REPR_KEY, UNATTRIBUTED, ErrorInfo, ToolCall
 from irimi.record import redact
 from irimi.sdk._capture import MAX_REPR
@@ -307,16 +308,17 @@ def test_an_sdk_error_quoting_a_key_across_the_cut_is_stored_as_its_placeholder(
 def test_a_repr_quoting_a_key_across_the_sdks_cut_keeps_no_part_of_it(run_workflow, mode):
     """`connect_with`'s options are captured as their repr, which quotes a key across the 1000
     characters the SDK keeps of one. The SDK cuts before irimi redacts, so it cuts where the key
-    starts, and keeps everything before it: cut at 1000, the 15 characters of the key it kept
-    were no longer its shape, and reached disk as they were, which universal invariant 4 finds.
-    The store's copy is the SDK's, so it holds no placeholder either."""
+    starts and marks the cut: cut at 1000, the 15 characters of the key it kept would no longer
+    be its shape, and would reach disk as they were, which universal invariant 4 finds. The
+    store's copy is the SDK's, the mark in place of the key."""
     shadow = run_workflow(W, "tool_raises", mode)
     [connect] = [c for c in tool_calls(shadow) if c.name == "crm.connect_with"]
     key = CANARIES["OPENAI_API_KEY"]
     said = repr(DriverOptions(key))
     assert said.index(key) < MAX_REPR < said.index(key) + len(key)
-    assert cast(dict, connect.args)["options"] == {REPR_KEY: said[: said.index(key)]}
-    assert said[: said.index(key)].endswith("', password='")
+    kept = said[: said.index(key)] + CUT_MARK
+    assert cast(dict, connect.args)["options"] == {REPR_KEY: kept}
+    assert kept.endswith("', password='<redacted>") and len(kept) <= MAX_REPR
     on_disk = [p.read_bytes() for p in shadow.store_root().rglob("*") if p.is_file()]
     assert not any(key[:12].encode() in data for data in on_disk)
     assert check_invariants(shadow) == []

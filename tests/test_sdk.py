@@ -32,7 +32,7 @@ from typing import Any
 import pytest
 
 from irimi import __version__, sdk
-from irimi.core import limits
+from irimi.core import limits, secret_shapes
 from irimi.core.exchange import Exchange
 from irimi.core.limits import MAX_ERROR_TYPE
 from irimi.protocol.control import RUN_ACTIONS, RunAction
@@ -944,12 +944,13 @@ def test_a_name_that_is_not_a_string_is_refused_and_a_long_one_is_cut(irimi):
 
 def test_a_long_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(irimi):
     """The SDK cuts a name before irimi redacts it: cut inside a key, the part it kept would be
-    too short for the key's shape, and reach disk. Cut outside secrets, the key is left out whole.
+    too short for the key's shape, and reach disk. Cut outside secrets, the key is marked whole.
     """
     head = "n" * (limits.MAX_NAME - 10) + " "
     with sdk.run(head + "ghp_" + "k" * 36):
         pass
-    assert [r.trigger.name for r in irimi.sdk_runs() if r.trigger is not None] == [head]
+    cut = "n" * (limits.MAX_NAME - 10) + secret_shapes.CUT_MARK
+    assert [r.trigger.name for r in irimi.sdk_runs() if r.trigger is not None] == [cut]
 
 
 def test_a_trigger_annotated_with_a_type_checking_only_import_still_binds_by_name():
@@ -1243,8 +1244,9 @@ def test_a_trigger_in_a_script_run_by_path_is_warned_of_once_under_irimi(tmp_pat
     assert entry == "__main__:handle"
     assert ticket[1] is False  # its class cannot be imported by another process either
     assert done.stderr == (
-        "irimi: trigger handle is in a script run by path, so its runs cannot be replayed by "
-        "entrypoint; start the agent with python -m <module> instead\n"
+        "irimi: trigger handle is defined in __main__, which a replay cannot import, so its runs "
+        "cannot be replayed by entrypoint; define it in a module and start the agent with "
+        "python -m <module>\n"
     )
     # Production stays quiet.
     assert _run_agent(tmp_path, ["pkg/agent.py"], active=False).stderr == ""
@@ -1396,7 +1398,7 @@ def test_anything_else_is_its_repr_and_not_replayable(value):
 
 def test_a_repr_is_cut_to_1000_characters_outside_secrets():
     """Cut before the store redacts it, so never inside a key, which redaction would no longer
-    find: a key across the cut is left out whole, and a repr with none across it keeps
+    find: a key across the cut is marked whole, and a repr with none across it keeps
     1000 characters, one long word included."""
 
     class Long:
@@ -1408,10 +1410,12 @@ def test_a_repr_is_cut_to_1000_characters_outside_secrets():
 
     assert capture.capture(Long("x " * 2500)) == ({"__irimi_repr__": "x " * 500}, False)
     keyed = Long("x" * 990 + " ghp_" + "k" * 36)
-    assert capture.capture(keyed) == ({"__irimi_repr__": "x" * 990 + " "}, False)
+    marked = "x" * 990 + secret_shapes.CUT_MARK
+    assert capture.capture(keyed) == ({"__irimi_repr__": marked}, False)
     assert capture.capture(Long("x" * 5000)) == ({"__irimi_repr__": "x" * 1000}, False)
     openai = Long("x" * 985 + "'sk-" + "k" * 40 + "'")
-    assert capture.capture(openai) == ({"__irimi_repr__": "x" * 985 + "'"}, False)
+    marked = "x" * 985 + "'" + secret_shapes.CUT_MARK
+    assert capture.capture(openai) == ({"__irimi_repr__": marked}, False)
 
 
 def test_a_repr_that_raises_is_named_unrepresentable():

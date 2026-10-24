@@ -36,6 +36,24 @@ _BOUNDARY = r"(?:(?<![A-Za-z0-9])|(?<=\\[bfnrt])|(?<=\\u[0-9A-Fa-f]{4})|(?<=%[0-
 SECRET_SHAPE = re.compile(_BOUNDARY + "(?:" + "|".join(SECRET_PATTERNS) + ")")
 
 
+# What a cut made with no redaction key, the SDK's, puts where a secret ran across it: dropping the
+# secret instead would post a value that is one long key as empty.
+CUT_MARK = "<redacted>"
+
+
+def cut_marking_secrets(text: str, limit: int) -> str:
+    """`cut_outside_secrets`, with a shape the cut runs across replaced by CUT_MARK, still within
+    `limit` characters: a limit with no room for the mark drops the shape unmarked. For a cut
+    made before redaction by a caller that holds no redaction key; the store, which holds one,
+    puts the shape's own placeholder there."""
+    cut = cut_outside_secrets(text, limit)
+    if len(cut) == len(text) or limit < len(CUT_MARK):
+        return cut
+    if SECRET_SHAPE.match(text, len(cut)) is None:
+        return cut
+    return cut_outside_secrets(text, max(0, limit - len(CUT_MARK))) + CUT_MARK
+
+
 def cut_outside_secrets(text: str, limit: int) -> str:
     """`text` cut to at most `limit` characters, never inside a secret's shape: when a shape in
     `text` runs across the cut, the cut is made where that shape starts instead.

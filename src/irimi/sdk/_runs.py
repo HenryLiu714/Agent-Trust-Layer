@@ -20,7 +20,7 @@ from typing import Any, overload
 
 from irimi import __version__
 from irimi.core.limits import MAX_NAME
-from irimi.core.secret_shapes import cut_outside_secrets
+from irimi.core.secret_shapes import cut_marking_secrets
 from irimi.protocol import trace
 from irimi.protocol.control import RunStart, run_end_to_json, run_start_to_json
 from irimi.protocol.entrypoints import entrypoint
@@ -313,25 +313,28 @@ def label(f: Callable[..., Any], name: object, api: str) -> str:
     `module:qualname` even when `name` is given, so a named tool is refused what a bare one is."""
     check_name(name, api)
     default = entrypoint(f, api)
-    return cut_outside_secrets(default if name is None else str(name), MAX_NAME)
+    return cut_marking_secrets(default if name is None else str(name), MAX_NAME)
 
 
 def check_name(name: object, api: str) -> None:
     """TypeError for a name that is not a string, at decoration rather than as a lost run. Cut
-    outside any secret's shape (`secret_shapes.cut_outside_secrets`) by `label` and `RunScope`."""
+    to MAX_NAME by `label` and `run`, a secret's shape the cut crosses marked
+    (`secret_shapes.cut_marking_secrets`)."""
     if name is not None and not isinstance(name, str):
         raise TypeError(f"{api}(name=...) must be a string, not {name!r}")
 
 
 def _warn_script(f: Callable[..., Any]) -> None:
-    """A trigger in a script run by path records `__main__:fn`, which no replay can import. Warned
-    once per process, and only under irimi, so production stays quiet."""
+    """A trigger in a script run by path, or in a package's `__main__.py`, records `__main__:fn`,
+    which no replay can import. Warned once per process, and only under irimi, so production
+    stays quiet."""
     if not context.is_active():
         return
     state.warn_once(
         "script-trigger",
-        "irimi: trigger %s is in a script run by path, so its runs cannot be replayed by "
-        "entrypoint; start the agent with python -m <module> instead",
+        "irimi: trigger %s is defined in __main__, which a replay cannot import, so its runs "
+        "cannot be replayed by entrypoint; define it in a module and start the agent with "
+        "python -m <module>",
         f.__qualname__,
     )
 
@@ -382,7 +385,7 @@ class run:
         if not isinstance(name, str):
             raise TypeError(f"sdk.run(name) must be a string, not {name!r}")
         self._inputs = inputs
-        self._name = cut_outside_secrets(name, MAX_NAME)
+        self._name = cut_marking_secrets(name, MAX_NAME)
         # One stack of entries per context, so an exit leaves the entry its own thread or task
         # made, and nested entries join the outer run as nested triggers do.
         self._entries: contextvars.ContextVar[tuple[_Entry, ...]] = contextvars.ContextVar(

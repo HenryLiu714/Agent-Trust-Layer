@@ -4,11 +4,24 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from examples.workflows import credentials
 from examples.workflows.harness.run import Scenario, Workflow
 from examples.workflows.harness.services import World
-from examples.workflows.w02_nightly_reconcile.agent import CHANNEL, charge_id, customer_id
+from examples.workflows.w02_nightly_reconcile.agent import (
+    CHANNEL,
+    RUN_LABEL_ENV,
+    SOURCE_ENV,
+    SOURCE_KEY_ENV,
+    charge_id,
+    customer_id,
+)
 
 PRIOR_REFUND = "re_PRIOR000"
+# `source` and a zero-width space: a metadata key that prints as `source` does.
+ZERO_WIDTH_KEY = "source\u200b"
+# Appended to the run's name: padding, then a key that starts 10 characters before the
+# 1000-character cut `irimi.core.limits.MAX_NAME` makes of a name, so the cut runs across it.
+LONG_RUN_LABEL = "o" * 971 + " " + credentials.STRIPE_API_KEY
 
 
 def _seed(charges: int, prior_refund: bool = False) -> Callable[[World], None]:
@@ -56,6 +69,19 @@ WORKFLOW = Workflow(
             ("--charges", "12", "--mismatches", "2"),
             setup=_seed(12),
             doc="two customer updates, which a replay with RECONCILE_SOURCE set tags otherwise",
+        ),
+        "zero_width_key": Scenario(
+            ("--charges", "12", "--mismatches", "2"),
+            env={SOURCE_ENV: "backfill", SOURCE_KEY_ENV: ZERO_WIDTH_KEY},
+            setup=_seed(12),
+            doc="two_mismatches tagging each customer's source under a key that ends in a "
+            "zero-width space, which a replay that tags it under `source` prints alike",
+        ),
+        "long_run_name": Scenario(
+            ("--charges", "12"),
+            env={RUN_LABEL_ENV: LONG_RUN_LABEL},
+            setup=_seed(12),
+            doc="clean, its run named past the 1000 characters a name keeps, a key across the cut",
         ),
         "datetime_trigger": Scenario(
             ("--charges", "12", "--mismatches", "2", "--datetime-trigger"),

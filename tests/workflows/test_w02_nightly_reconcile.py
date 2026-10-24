@@ -8,8 +8,15 @@ tool) changes it.
 import pytest
 
 from examples.workflows.harness.run import check_invariants, compare, replay, replayed_run_id
-from examples.workflows.w02_nightly_reconcile.agent import LEDGER, SOURCE_ENV, customer_id
+from examples.workflows.w02_nightly_reconcile.agent import (
+    LEDGER,
+    SOURCE_ENV,
+    SOURCE_KEY_ENV,
+    customer_id,
+)
+from examples.workflows.w02_nightly_reconcile.scenarios import LONG_RUN_LABEL
 from irimi.core.exchange import Exchange
+from irimi.core.limits import MAX_NAME
 
 W = "w02_nightly_reconcile"
 # Each test runs under `irimi shadow -- <cmd>` and under serve mode, its agent beside irimi.
@@ -303,3 +310,51 @@ def test_a_replay_of_a_replay_answers_the_page_from_the_first_replay(replayed, t
     code, shown, _ = second.runs("show", source, "--store", str(second.store_root()))
     assert code == 0
     assert shown[:3] == [f"run: {source}", "attribution: sdk", "trigger: nightly-reconcile"]
+
+
+def test_a_metadata_key_that_prints_like_another_is_named_apart_in_the_field_diff(replayed):
+    """`zero_width_key` tags each customer's source under `source` and a zero-width space; its
+    replay tags it under `source`. Both print `update customer`, so each update is changed and
+    its fields are printed: the two keys named apart, the plain one as it is and the other as
+    its JSON string, never as two lines that both read `body.metadata.source`."""
+    recorded, replay = replayed(W, "zero_width_key", {SOURCE_KEY_ENV: "source"}, command=True)
+    assert check_invariants(replay) == []
+    source = recorded.one("run.start")["run"]
+    reconciled = "○ tool  examples.workflows.w02_nightly_reconcile.agent:mark_reconciled"
+    post = f'slack  post to #C0RECON: "reconciled 2 for 2026-09-27"  {PASSED}'
+    rows = [
+        line
+        for i in (1, 0)
+        for line in (
+            f"  ~ A ○ stripe  update customer {customer_id(i)}  faked; not checked",
+            f"    B ○ stripe  update customer {customer_id(i)}  faked; not checked",
+            '      body.metadata.source: (absent) -> "backfill"',
+            '      body.metadata."source\\u200b": "backfill" -> (absent)',
+            f"  = {reconciled}  fake ran instead",
+        )
+    ]
+    assert replay.exit_code == 1
+    result = replay.replay_result()
+    assert result[0] == f"irimi replay · {source} -> {replay.process_run_id()}"
+    assert result[result.index("") + 1 :] == [
+        *rows,
+        f"  = ○ {post}",
+        "",
+        "  3 same · 2 changed · 0 only in A · 0 only in B",
+    ]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_run_name_cut_across_a_key_keeps_none_of_the_key(run_workflow, mode):
+    """The run's name runs past the 1000 characters a name keeps, with a key across the cut. The
+    SDK cuts it where the key starts and marks the cut, so the stored name holds no part of the
+    key, and `irimi runs show` names the run by it."""
+    shadow = run_workflow(W, "long_run_name", mode)
+    assert check_invariants(shadow) == []
+    [run] = shadow.sdk_runs()
+    name = f"nightly-reconcile {LONG_RUN_LABEL[:971]} <redacted>"
+    assert len(name) == MAX_NAME
+    assert run.trigger is not None and run.trigger.name == name
+    code, out, err = shadow.runs("show", run.run_id)
+    assert (code, err) == (0, [])
+    assert f"trigger: {name}" in out

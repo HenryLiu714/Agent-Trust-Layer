@@ -30,6 +30,10 @@ LEDGER = "ledger.db"
 # A source to tag each customer with too, when set: a change to the job that changes every
 # customer update's body and none of the summary's lines.
 SOURCE_ENV = "RECONCILE_SOURCE"
+# Words a deploy appends to the run's name, as a scheduler that names a job by its command line.
+RUN_LABEL_ENV = "RECONCILE_RUN_LABEL"
+# The metadata key the source is tagged under, `source` unless set.
+SOURCE_KEY_ENV = "RECONCILE_SOURCE_KEY"
 
 
 def charge_id(i: int) -> str:
@@ -95,7 +99,8 @@ def reconcile(date: str) -> int:
     for c in mismatched:
         tags = {"metadata[reconciled]": date, "metadata[charge]": c["id"]}
         if os.environ.get(SOURCE_ENV):
-            tags["metadata[source]"] = os.environ[SOURCE_ENV]
+            key = os.environ.get(SOURCE_KEY_ENV, "source")
+            tags[f"metadata[{key}]"] = os.environ[SOURCE_ENV]
         tagged = stripe("POST", f"/v1/customers/{c['customer']}", tags, label="tag_customer")
         # The ledger says reconciled only once Stripe says tagged.
         if not tagged.ok:
@@ -147,7 +152,9 @@ def main(argv: list[str]) -> int:
     agentkit.obs("trigger", value=when, type=type(when).__name__)
     date = when.date().isoformat() if isinstance(when, dt.datetime) else when
 
-    with sdk.run("nightly-reconcile", inputs={"date": when}):
+    label = os.environ.get(RUN_LABEL_ENV)
+    name = f"nightly-reconcile {label}" if label else "nightly-reconcile"
+    with sdk.run(name, inputs={"date": when}):
         total = reconcile(date)
         if args.twice:
             total += reconcile(date)

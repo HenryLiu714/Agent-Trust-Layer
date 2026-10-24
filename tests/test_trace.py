@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from irimi.core import limits
+from irimi.core import limits, secret_shapes
 from irimi.core.exchange import Exchange, Flag, Kind, Precondition, Request, Response
 from irimi.protocol import control as protocol_control
 from irimi.protocol import trace
@@ -767,7 +767,7 @@ def test_an_invalid_run_id(run_id):
 def test_error_info_names_the_exception_by_module_and_qualname_and_keeps_its_message_whole():
     """The message is posted whole, for the store to redact before it cuts it to
     MAX_ERROR_MESSAGE. Past MAX_POSTED_MESSAGE it is cut outside any secret, so a key
-    straddling that cut is left out whole, never cut in two, and text with none keeps all it can."""
+    straddling that cut is marked whole, never cut in two, and text with none keeps all it can."""
 
     class Boom(Exception):
         pass
@@ -777,7 +777,8 @@ def test_error_info_names_the_exception_by_module_and_qualname_and_keeps_its_mes
     assert info.message == "x" * 5000
     assert ErrorInfo.from_exception(ValueError("bad")) == ErrorInfo("builtins.ValueError", "bad")
     said = "x" * (limits.MAX_POSTED_MESSAGE - 10) + " ghp_" + "k" * 36
-    assert ErrorInfo.from_exception(Boom(said)).message == said[: limits.MAX_POSTED_MESSAGE - 9]
+    marked = said[: limits.MAX_POSTED_MESSAGE - 10] + secret_shapes.CUT_MARK
+    assert ErrorInfo.from_exception(Boom(said)).message == marked
     blob = "x" * (2 * limits.MAX_POSTED_MESSAGE)
     assert ErrorInfo.from_exception(Boom(blob)).message == "x" * limits.MAX_POSTED_MESSAGE
 
@@ -785,7 +786,7 @@ def test_error_info_names_the_exception_by_module_and_qualname_and_keeps_its_mes
 def test_error_info_cuts_a_type_no_class_statement_would_make():
     """A class made with `type()` may be named anything. Its type is cut to MAX_POSTED_TYPE
     outside any secret, so its post stays under the control endpoint's 2 MiB and the run keeps
-    its end, and a key across that cut is left out whole."""
+    its end, and a key across that cut is marked whole."""
     long = type("L" * (3 * 1024 * 1024), (Exception,), {})
     assert (
         ErrorInfo.from_exception(long()).type
@@ -793,7 +794,8 @@ def test_error_info_cuts_a_type_no_class_statement_would_make():
     )
     head = "K" * (limits.MAX_POSTED_TYPE - len(__name__) - 10) + "_"
     keyed = type(head + "ghp_" + "k" * 36, (Exception,), {})
-    assert ErrorInfo.from_exception(keyed()).type == f"{__name__}.{head}"
+    marked = f"{__name__}.{head}"[: limits.MAX_POSTED_TYPE - 10] + secret_shapes.CUT_MARK
+    assert ErrorInfo.from_exception(keyed()).type == marked
 
 
 def test_error_info_survives_an_exception_it_cannot_print():

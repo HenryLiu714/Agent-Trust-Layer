@@ -18,7 +18,7 @@ from typing import Any, Protocol, cast
 
 from irimi.core.calls import receiver, signature
 from irimi.core.limits import MAX_CAPTURED_BYTES
-from irimi.core.secret_shapes import cut_outside_secrets
+from irimi.core.secret_shapes import cut_marking_secrets
 from irimi.protocol.trace import (
     MAIN_MODULE,
     REPR_KEY,
@@ -50,7 +50,7 @@ def capture(value: object) -> Captured:
     value inside more than `MAX_DEPTH` containers is `{"__irimi_repr__": "<too deep>"}`, and
     args whose JSON passes `MAX_CAPTURED_BYTES` are replaced whole by the truncation marker; the
     walk counts bytes as it goes, so a value that holds itself is walked at most that far. A
-    `repr` is cut to `MAX_REPR` outside any secret's shape (`secret_shapes.cut_outside_secrets`),
+    `repr` is cut to `MAX_REPR`, a secret's shape the cut crosses marked (`cut_marking_secrets`),
     since the store redacts it only after this cut. Never raises."""
     return _capture(value, 0)
 
@@ -302,6 +302,6 @@ class _Walk:
 
 def _repr(value: object) -> str:
     try:
-        return cut_outside_secrets(repr(value), MAX_REPR)
+        return cut_marking_secrets(repr(value), MAX_REPR)
     except Exception:
         return f"<unrepresentable {type(value).__qualname__}>"

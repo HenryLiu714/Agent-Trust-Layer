@@ -49,7 +49,7 @@ from irimi.core.exchange import (
     Response,
 )
 from irimi.core.limits import MAX_ERROR_MESSAGE, MAX_ERROR_TYPE, MAX_POSTED_MESSAGE, MAX_POSTED_TYPE
-from irimi.core.secret_shapes import cut_outside_secrets
+from irimi.core.secret_shapes import cut_marking_secrets
 
 # One integer for the whole format, in every run.json. A field added later decodes as its default
 # when absent; a new value in a closed vocabulary (`read_one_of`) or a changed meaning bumps it.
@@ -139,8 +139,9 @@ class ErrorInfo:
         """The one spelling of "what went wrong" a run or a tool call records.
 
         Its message is `str(exc)`, and its type the class's `module.qualname` (`importable_module`),
-        cut to MAX_POSTED_MESSAGE and MAX_POSTED_TYPE characters outside any secret's shape: the
-        SDK cannot redact, and the store redacts each whole before it cuts it to a label.
+        cut to MAX_POSTED_MESSAGE and MAX_POSTED_TYPE characters, a secret's shape the cut crosses
+        marked (`secret_shapes.cut_marking_secrets`): the SDK cannot redact, and the store redacts
+        each whole before it cuts it to a label.
 
         Never raises on an exception whose `__str__` does: the SDK calls this while an
         agent's own exception is in flight, and recording it must not replace it with another."""
@@ -150,10 +151,10 @@ class ErrorInfo:
         except Exception:
             message = f"<unprintable {kind.__qualname__}>"
         return cls(
-            cut_outside_secrets(
+            cut_marking_secrets(
                 f"{importable_module(kind.__module__)}.{kind.__qualname__}", MAX_POSTED_TYPE
             ),
-            cut_outside_secrets(message, MAX_POSTED_MESSAGE),
+            cut_marking_secrets(message, MAX_POSTED_MESSAGE),
         )
 
     def as_label(self) -> "ErrorInfo":

@@ -280,6 +280,12 @@ def trigger(fn: Callable[..., Any] | None = None, *, name: str | None = None) ->
     return decorate(fn) if fn is not None else decorate
 
 
+def _run_name(entered: Any, name: str) -> str:
+    """The name the real SDK's run goes by, cut as irimi stores it, or `name` when it yielded no
+    run (inactive, or joined to an outer one)."""
+    return str(entered.name) if entered is not None else name
+
+
 class run:
     """`with sdk.run(name, inputs=...)` and `async with` alike. The block gets what the real
     SDK's gives it, a `Run` or None, and None under the fallback."""
@@ -294,7 +300,7 @@ class run:
         entered = None
         if self._inner is not None:
             entered = self._inner.__enter__()
-            self._cm = _observed(self._name)
+            self._cm = _observed(_run_name(entered, self._name))
         else:
             self._cm = _entered(self._name)
         self._cm.__enter__()
@@ -310,7 +316,7 @@ class run:
     async def __aenter__(self) -> Any:
         if self._inner is not None:
             entered = await self._inner.__aenter__()
-            self._cm = _observed(self._name)
+            self._cm = _observed(_run_name(entered, self._name))
             self._cm.__enter__()
             return entered
         return self.__enter__()

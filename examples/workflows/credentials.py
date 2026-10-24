@@ -14,6 +14,9 @@ ANTHROPIC_API_KEY = "sk-ant-" + "CANARYanthropic0000000000000"
 OPENAI_API_KEY = "sk-" + "CANARYopenai000000000000000000000"
 SLACK_WEBHOOK_PATH = "/services/T0CANARY/B0CANARY/" + "CANARYwebhookpath000000"
 
+# A key W10's agent raises with as its whole error message, longer than any cut irimi makes of one.
+LONG_ERROR_KEY = "sk_live_" + "CANARYlongerror" + "0" * 4000
+
 # Handed back by a fake service in a response body, never given to the agent.
 CLIENT_SECRET = "CANARY" + "clientsecret000000000000"
 BOMB_SECRET = "CANARY" + "bombsecret00000000000000"

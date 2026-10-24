@@ -23,7 +23,7 @@ import pytest
 from irimi import sdk, servicemaps
 from irimi.cli import main
 from irimi.config import ca, paths
-from irimi.core import limits
+from irimi.core import limits, secret_shapes
 from irimi.protocol import trace
 from irimi.protocol.env import CONTROL_ENV, ENGINE_ACTIVE_ENV, RUN_ENV
 from irimi.protocol.trace import ErrorInfo, ToolCall
@@ -743,7 +743,7 @@ def test_a_tool_name_is_cut_to_the_run_name_limit(posted):
 
 def test_a_long_tool_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(posted):
     """A tool's name is cut before irimi redacts it, as a run's is: a key straddling the cut is
-    left out whole rather than kept in part, too short for its shape to be redacted."""
+    marked rather than kept in part, too short for its shape to be redacted."""
     head = "n" * (limits.MAX_NAME - 10) + " "
 
     @sdk.read_tool(name=head + "ghp_" + "k" * 36)
@@ -752,7 +752,7 @@ def test_a_long_tool_name_is_cut_outside_secrets_so_it_keeps_no_part_of_a_key(po
 
     keyed()
     [(_, _, doc)] = posted.posts
-    assert doc["name"] == head
+    assert doc["name"] == "n" * (limits.MAX_NAME - 10) + secret_shapes.CUT_MARK
 
 
 def test_an_active_tool_logs_nothing(posted, warnings, monkeypatch):

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import uuid
 from dataclasses import asdict, dataclass
@@ -42,6 +43,9 @@ DB_LOST_ENV = "HELPDESK_DB_LOST"
 # result the model is sent carries the tag, so the first model call, which holds no tool result
 # yet, still matches its recording, and every later one does not. The replay diverges mid-loop.
 RESULT_TAG_ENV = "TOOL_RESULT_TAG"
+# Set for a run that, once its first model call is answered, deletes stored runs while it is
+# still in progress, as a cron job sharing irimi's home would: `irimi runs rm` and `runs prune`.
+RETENTION_ENV = "HELPDESK_RETENTION_MID_RUN"
 PROMPTS = {
     "full": "You are a refund agent. Refund the full remaining amount of a disputed charge.",
     "half": "You are a refund agent. Refund half of the remaining amount of a disputed charge.",
@@ -134,6 +138,42 @@ def run_tool(ticket: Ticket, turn: int, name: str, args: dict[str, Any]) -> str:
     return _tool_result(name, error="unknown tool")
 
 
+# `irimi` run as a cron job two hours from now would run it: by its clock, this run has then
+# made no call for longer than `--older-than 1h`.
+TWO_HOURS_LATER = (
+    "import sys, time; now = time.time; time.time = lambda: now() + 7200; "
+    "from irimi.cli import main; sys.exit(main(sys.argv[1:]))"
+)
+
+
+def delete_stored_runs() -> None:
+    """Ask irimi to delete this run, the newest run, and every run idle for an hour, as a cron
+    job two hours from now, each logged with its exit and what it printed, while this run is
+    still in progress."""
+    run_id = sdk.current_run_id()
+    commands = [
+        *([("rm_run", ["runs", "rm", run_id])] if run_id else []),
+        ("rm_last", ["runs", "rm", "last"]),
+        ("prune", ["runs", "prune", "--older-than", "1h"]),
+        ("prune_dry_run", ["runs", "prune", "--older-than", "1h", "--dry-run"]),
+    ]
+    for label, argv in commands:
+        done = subprocess.run(
+            [sys.executable, "-c", TWO_HOURS_LATER, *argv],
+            capture_output=True,
+            text=True,
+            timeout=agentkit.timeout() * 6,
+            check=False,
+        )
+        agentkit.obs(
+            "retention",
+            label=label,
+            code=done.returncode,
+            out=done.stdout.splitlines(),
+            err=done.stderr.splitlines(),
+        )
+
+
 @sdk.trigger
 def handle_ticket(ticket: Ticket) -> dict[str, Any]:
     system = PROMPTS[os.environ.get("PROMPT", "full")]
@@ -146,6 +186,8 @@ def handle_ticket(ticket: Ticket) -> dict[str, Any]:
             system, messages, tools=TOOLS, label=f"llm#{turn}", metadata=SESSION
         )
         messages.append({"role": "assistant", "content": reply["content"]})
+        if turn == 1 and os.environ.get(RETENTION_ENV):
+            delete_stored_runs()
         if reply["stop_reason"] != "tool_use":
             return {"turns": turn, "refund_statuses": refunds, "final": agentkit.text_of(reply)}
         results = []

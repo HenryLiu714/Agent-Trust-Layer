@@ -984,6 +984,7 @@ def test_runs_prune_judges_a_run_that_has_not_ended_by_when_its_files_were_last_
 @pytest.mark.parametrize("older_than", ["30", "1.5d", "30m", "-1d", "d"])
 def test_runs_prune_refuses_a_duration_that_is_not_whole_hours_or_days(older_than, capsys):
     with pytest.raises(SystemExit) as exited:
-        main(["runs", "prune", "--older-than", older_than])
+        # With `=`: the argparse of a 3.12 takes a separate `-1d` for a flag, not a value.
+        main(["runs", "prune", f"--older-than={older_than}"])
     assert exited.value.code == 2
-    assert "give a whole number of hours or days, as 12h or 30d" in capsys.readouterr().err
+    assert "give a positive whole number of hours or days, as 12h or 30d" in capsys.readouterr().err

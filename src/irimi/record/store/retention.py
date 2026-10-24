@@ -1,22 +1,25 @@
 """Deleting stored runs, for `irimi runs rm` and `irimi runs prune`.
 
 A run's bodies are content-addressed blobs that other runs may share, so removing a run removes
-only the blobs no remaining run refers to. A serve may be writing the store at any moment, so
-removal holds the store's `serve.lock` and is refused while a serve holds it. An `irimi shadow`
-takes no lock, so pruning judges a run that has not ended by when its files were last written.
+only the blobs no remaining run refers to. Removal is refused while any irimi process writes the
+store: a serve holds `serve.lock`, and every store writing under the root holds its
+`lock.WriterLock`, so a run in progress is never deleted, nor a blob a writer is about to name
+again. A run that has not ended and that no process writes is one whose irimi crashed; pruning
+judges its age by when its files were last written.
 """
 
 import os
 import re
 import shutil
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from irimi.protocol.trace import UNATTRIBUTED, RunRecord
 from irimi.record.store.layout import EVENTS_FILE, RUN_FILE, StoreLayout, names_a_run_dir
-from irimi.record.store.lock import ServeLock
+from irimi.record.store.lock import ServeLock, WriterLock
 from irimi.record.store.reader import StoreReader
 
 # Any digest-shaped string in an events file counts as a reference: reading the lines as text
@@ -66,8 +69,14 @@ def older_than(root: Path, cutoff: float) -> list[str]:
 
 
 def plan(root: Path, run_ids: Iterable[str]) -> Removal:
-    """What removing `run_ids`, each one the store holds, deletes. Raises OSError when an events
-    file cannot be read, so no blob another run needs is ever counted as unused."""
+    """What removing `run_ids`, each one the store holds, deletes, without deleting it. Raises
+    StoreLocked when `remove` would be refused, and OSError when an events file cannot be read,
+    so no blob another run needs is ever counted as unused."""
+    with _held(root):
+        return _plan(root, run_ids)
+
+
+def _plan(root: Path, run_ids: Iterable[str]) -> Removal:
     layout = StoreLayout(root)
     runs = tuple(dict.fromkeys(run_ids))
     removed = {_events_of(layout, run_id) for run_id in runs}
@@ -85,11 +94,11 @@ def plan(root: Path, run_ids: Iterable[str]) -> Removal:
 
 def remove(root: Path, run_ids: Iterable[str]) -> Removal:
     """Delete `run_ids`, each one the store holds, and the blobs only they refer to, holding the
-    store's `serve.lock` throughout. Raises StoreLocked while a serve holds it, and OSError when a
-    file cannot be read or deleted; whatever was deleted before that stays deleted."""
-    lock = ServeLock.hold(root)
-    try:
-        removal = plan(root, run_ids)
+    store's locks throughout. Raises StoreLocked while a serve holds `serve.lock`, StoreBusy while
+    any other irimi process writes the store, and OSError when a file cannot be read or deleted;
+    whatever was deleted before that stays deleted."""
+    with _held(root):
+        removal = _plan(root, run_ids)
         layout = StoreLayout(root)
         for run_id in removal.runs:
             if run_id == UNATTRIBUTED:
@@ -99,8 +108,21 @@ def remove(root: Path, run_ids: Iterable[str]) -> Removal:
         for digest in removal.blobs:
             layout.blob(digest).unlink(missing_ok=True)
         return removal
+
+
+@contextmanager
+def _held(root: Path) -> Iterator[None]:
+    """`root`'s `serve.lock`, then its writer lock exclusively, until the block ends: the serve's
+    refusal first, since a serve holds both."""
+    serve = ServeLock.hold(root)
+    try:
+        writers = WriterLock.exclude(root)
+        try:
+            yield
+        finally:
+            writers.release()
     finally:
-        lock.release()
+        serve.release()
 
 
 def _events_of(layout: StoreLayout, run_id: str) -> Path:
@@ -119,8 +141,7 @@ def _digests(events: Path) -> set[str]:
 
 def _last_moment(record: RunRecord, directory: Path) -> float:
     """When the run ended, or for one that has not, when any of its files was last written: a
-    run an `irimi shadow` is still writing is never older than the cutoff, however long ago it
-    started."""
+    crashed run is as old as its last event, however long ago it started."""
     if record.end is not None:
         return record.end.ended_at
     written = []

@@ -55,7 +55,7 @@ from irimi.core.limits import (
     MAX_REDACTED_BODY,
     MAX_STORED_BODY,
 )
-from irimi.core.secret_shapes import cut_outside_secrets
+from irimi.core.secret_shapes import SECRET_SHAPE, cut_outside_secrets
 from irimi.protocol import trace
 from irimi.protocol.trace import (
     SCHEMA_VERSION,
@@ -80,6 +80,7 @@ from irimi.record.store.layout import (
     read_run_json,
     resume_seq,
 )
+from irimi.record.store.lock import WriterLock
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +205,8 @@ class DirectoryStore:
 
         `on_run_ended` is called on the writer thread with a run's id once that run's end is
         written, so every event queued before the end is already on disk: `serve` prints the
-        run's summary from it. What it raises is logged and swallowed. It runs before the
+        run's summary from it. It is called too when writing the end failed, which the end's
+        drop then counts. What it raises is logged and swallowed. It runs before the
         writer takes its next item, so a slow one holds the queue back.
 
         `replay_of` is the stored run the engine writing here answers from, if it is a replay: each
@@ -213,6 +215,8 @@ class DirectoryStore:
         private_dir(root)
         if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
             raise PermissionError(f"the trace store {root} is not a writable directory")
+        # Held until the writer is done, so no run is deleted while this store may write it.
+        self._writer_lock = WriterLock.share(root)
         self.layout = StoreLayout(root)
         self._key = key
         self._on_run_ended = on_run_ended
@@ -281,7 +285,7 @@ class DirectoryStore:
         # against MAX_QUEUED_BYTES: a run never loses its end to the byte budget. An error that is
         # not text is a drop, never raised into the caller.
         try:
-            queued = None if error is None else _queued_error(error)
+            queued = None if error is None else _queued_error(error, self._key)
         except Exception as exc:
             self._drop(run_id, f"it could not be queued: {type(exc).__name__}")
             return
@@ -309,6 +313,9 @@ class DirectoryStore:
             self._thread.join(max(0.0, deadline - time.monotonic()))
             if first and self._thread.is_alive():
                 self._abandon()
+            # A writer still running keeps the lock, which the process's exit releases.
+            if not self._thread.is_alive():
+                self._writer_lock.release()
         except Exception as exc:
             logger.warning("irimi: the trace store failed to close cleanly: %s", type(exc).__name__)
 
@@ -423,21 +430,25 @@ class DirectoryStore:
         self._write_record(run, redact.run_for_disk(record, self._key))
 
     def _end(self, end: _EndRun) -> None:
-        run = self._run_dir(end.run_id)
-        record = run.record or self._attribution.header(end.run_id)
-        error = redact.redact_error(end.error, self._key)
-        self._write_record(
-            run, replace(record, end=RunEnd(end.ended_at, end.outcome, error, end.exit_code))
-        )
-        self._forget(end.run_id, run)
-        if self._on_run_ended is not None:
-            try:
-                self._on_run_ended(end.run_id)
-            except Exception as exc:
-                # The run is stored whatever its caller did with the news. The type only, as
-                # every failure here is logged: a message may quote what it choked on.
-                logger.warning("irimi: the end-of-run callback raised %s", type(exc).__name__)
-                logger.debug("irimi: the end-of-run callback's traceback", exc_info=True)
+        # The run has ended whether or not its end could be written, so its caller hears of it
+        # either way: the engine drops the run's write log and keys on the news.
+        try:
+            run = self._run_dir(end.run_id)
+            record = run.record or self._attribution.header(end.run_id)
+            error = redact.redact_error(end.error, self._key)
+            self._write_record(
+                run, replace(record, end=RunEnd(end.ended_at, end.outcome, error, end.exit_code))
+            )
+            self._forget(end.run_id, run)
+        finally:
+            if self._on_run_ended is not None:
+                try:
+                    self._on_run_ended(end.run_id)
+                except Exception as exc:
+                    # The run is stored whatever its caller did with the news. The type only, as
+                    # every failure here is logged: a message may quote what it choked on.
+                    logger.warning("irimi: the end-of-run callback raised %s", type(exc).__name__)
+                    logger.debug("irimi: the end-of-run callback's traceback", exc_info=True)
 
     def _run_dir(self, run_id: str) -> _OpenRun:
         """The writer's state for a run directory a start or an end may write. Raises ValueError -
@@ -670,13 +681,24 @@ def _item_bytes(item: _Item) -> int:
     return 0
 
 
-def _queued_error(error: ErrorInfo) -> ErrorInfo:
+def _queued_error(error: ErrorInfo, key: bytes) -> ErrorInfo:
     """`error` as it waits for the writer: its type and its message each cut to MAX_QUEUED_ERROR
-    outside any secret's shape. Raises TypeError for one that is not text."""
+    (`_cut_hiding`). Raises TypeError for one that is not text."""
     return ErrorInfo(
-        cut_outside_secrets(error.type, MAX_QUEUED_ERROR),
-        cut_outside_secrets(error.message, MAX_QUEUED_ERROR),
+        _cut_hiding(error.type, MAX_QUEUED_ERROR, key),
+        _cut_hiding(error.message, MAX_QUEUED_ERROR, key),
     )
+
+
+def _cut_hiding(text: str, limit: int, key: bytes) -> str:
+    """`text` cut outside any secret's shape, and a shape the cut runs across replaced by its
+    placeholder: dropped instead, a message that is one long key would be stored empty. What is
+    kept is a prefix of `text` redacted, which the writer redacts again and cuts."""
+    cut = cut_outside_secrets(text, limit)
+    if len(cut) == len(text):
+        return text
+    shape = SECRET_SHAPE.match(text, len(cut))
+    return cut if shape is None else cut + redact.placeholder(key, shape.group())
 
 
 def _item_run_id(item: _Item) -> str:

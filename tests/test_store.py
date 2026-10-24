@@ -1206,8 +1206,8 @@ def test_an_end_waits_with_its_error_cut_outside_secrets_and_is_never_dropped_fo
 ):
     """A posted error may be 2 MiB, and the writer cuts it only once redacted. So it waits
     cut outside secrets to MAX_QUEUED_ERROR, an end costs the byte budget nothing, and no run
-    loses its end to it: a key across that cut is left out whole, and the stored error is still
-    a prefix of the redacted whole."""
+    loses its end to it: a key across that cut waits as its placeholder, and the stored error is
+    still a prefix of the redacted whole."""
     monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", 100)
     held: list[object] = []
     taken, release = threading.Event(), threading.Event()
@@ -1231,7 +1231,8 @@ def test_an_end_waits_with_its_error_cut_outside_secrets_and_is_never_dropped_fo
     s.close()
     [queued] = [item for item in held if isinstance(item, writer._EndRun)]
     assert queued.error == ErrorInfo(
-        "t." * (limits.MAX_QUEUED_ERROR // 2), "m" * (limits.MAX_QUEUED_ERROR - 10) + " "
+        "t." * (limits.MAX_QUEUED_ERROR // 2),
+        "m" * (limits.MAX_QUEUED_ERROR - 10) + " " + redact.placeholder(key, secret),
     )
     record = StoreReader(root).load_run("r1").record
     assert record.end is not None

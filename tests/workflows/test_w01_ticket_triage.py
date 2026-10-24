@@ -1723,3 +1723,71 @@ def test_a_lookup_recorded_after_a_refund_the_replay_has_not_made_runs_for_real_
     ]
     assert replay.internet.requests("api.stripe.com") == []
     assert replay.returned() == recorded.returned()
+
+
+# -- deleting runs while one is in progress -------------------------------------------------------
+
+# What `retention_mid_run`'s agent asks irimi to delete while its run is in progress, by label.
+RETENTION_COMMANDS = ("rm_run", "rm_last", "prune", "prune_dry_run")
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_runs_are_not_deleted_while_an_irimi_process_writes_the_store(run_workflow, mode, tmp_path):
+    """Mid-run, the agent asks irimi to delete its own run, the newest run, and, as a cron job two
+    hours later would, every run idle for an hour, for real and as a dry run. The run in progress
+    is such a run, and each is refused, exit 2, because an irimi process is writing the store:
+    under `irimi shadow` its store's writer lock, under serve its `serve.lock`. Nothing is
+    deleted: the run holds every exchange `full_refund`'s does. Once irimi has stopped, the same
+    run is deleted. Bare there is no store, and so no run to delete."""
+    shadow = run_workflow(W, "retention_mid_run", mode)
+    root = shadow.store_root()
+    writer = "another irimi serve" if mode == "serve" else "another irimi process"
+    refused = {
+        "code": 2,
+        "out": [],
+        "err": [f"error: {writer} is writing the trace store {root}; stop it to delete runs"],
+    }
+    asked = {e.pop("label"): e for e in shadow.events("retention", with_time=False)}
+    assert {label: {k: v for k, v in e.items() if k != "event"} for label, e in asked.items()} == (
+        dict.fromkeys(RETENTION_COMMANDS, refused)
+    )
+    [run] = shadow.sdk_runs()
+    full = run_workflow(W, "full_refund", mode)
+    [full_run] = full.sdk_runs()
+    assert len(shadow.stored().load_run(run.run_id).events) == len(
+        full.stored().load_run(full_run.run_id).events
+    )
+    assert run.end is not None and run.end.outcome == "ok"
+    # Stopped, the same run is deleted: in a copy of the home, so the session's run keeps its own.
+    home = tmp_path / "home"
+    shutil.copytree(shadow.home, home)
+    stopped = dataclasses.replace(shadow, home=home)
+    code, out, err = stopped.runs("rm", run.run_id)
+    assert (code, out[0], err) == (0, f"deleted run {run.run_id}", [])
+    assert re.fullmatch(r"deleted 1 run and \d+ stored bod(y|ies) no other run uses", out[-1])
+    assert run.run_id not in [r.run_id for r in stopped.stored().list_runs()]
+    bare = run_workflow(W, "retention_mid_run", "bare")
+    nothing = f"in {bare.store_root()}"
+    assert {e["label"]: (e["code"], e["out"], e["err"]) for e in bare.events("retention")} == {
+        "rm_last": (2, [], [f"error: no runs {nothing}"]),
+        "prune": (0, [f"no runs older than 1h {nothing}"], []),
+        "prune_dry_run": (0, [f"no runs older than 1h {nothing}"], []),
+    }
+    assert bare.exit_code == shadow.exit_code == 0
+
+
+def test_the_summary_starts_on_a_line_of_its_own_after_a_child_that_left_one_open(
+    shared_store_run, tmp_path
+):
+    """The real `irimi shadow`, in its own process over W1's home, running a command that ends
+    its output without a newline, as `curl` prints a body: the child's last line is ended, and
+    irimi's summary starts at the left margin."""
+    full = shared_store_run(W, "full_refund")
+    shadow = ["shadow", "--port", "0", "--store", str(tmp_path / "store"), "--"]
+    child = [sys.executable, "-c", "print('no newline here', end='')"]
+    ended = _irimi_process(full, *shadow, *child)
+    assert ended.returncode == 0, ended.stderr
+    lines = ended.stdout.splitlines()
+    assert "no newline here" in lines
+    after = lines[lines.index("no newline here") + 1 :]
+    assert next(line for line in after if line).startswith("irimi shadow · run ")

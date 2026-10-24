@@ -97,6 +97,13 @@ WORKFLOW = Workflow(
             shadow_flags=("--quiet",),
             serve_flags=("--quiet",),
         ),
+        "retention_mid_run": Scenario(
+            ARGV,
+            env={"PROMPT": "full", "HELPDESK_RETENTION_MID_RUN": "1"},
+            setup=_world,
+            doc="full_refund, which asks irimi to delete its own run, the newest run and old runs "
+            "while it is still in progress: refused, and nothing is deleted",
+        ),
         "retried_refund": _scenario(
             "retry", "the model sends one refund twice in a turn, same key: one write (#46)"
         ),

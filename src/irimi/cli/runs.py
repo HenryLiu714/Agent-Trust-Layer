@@ -89,8 +89,7 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
         **help_formatted(
             help="delete stored runs",
             description="Delete stored runs, and the stored bodies no other run uses. Refused "
-            "while an irimi serve\nwrites the store, but not while an irimi shadow writes a run "
-            "it names: check that\nfirst.",
+            "while any irimi\nprocess - a shadow, a replay or a serve - writes the store.",
             epilog=epilog(["irimi runs rm last", "irimi runs rm 7729eae4 9c20"]),
         ),
     )
@@ -103,7 +102,7 @@ def register(subparsers: "argparse._SubParsersAction[Any]") -> None:
             help="delete stored runs older than a duration",
             description="Delete every stored run that ended (or, if it has not ended, was last "
             "written) longer\nago than --older-than, and the stored bodies no other run uses. "
-            "Refused while an irimi\nserve writes the store.",
+            "Refused while any irimi\nprocess writes the store, --dry-run included.",
             epilog=epilog(
                 ["irimi runs prune --older-than 30d --dry-run", "irimi runs prune --older-than 12h"]
             ),
@@ -147,7 +146,7 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
         return exitcodes.ERROR
     if not every:
         print(f"no runs in {root}")
-        return 0
+        return exitcodes.OK
     records = every if args.all else every[: args.limit]
     rows = []
     for record in records:
@@ -165,7 +164,7 @@ def cmd_runs_list(args: argparse.Namespace) -> int:
         rows.append(runs.run_list_columns(record, events))
     for line in runs.run_list_lines(rows, older=len(every) - len(records)):
         print(line)
-    return 0
+    return exitcodes.OK
 
 
 def cmd_runs_show(args: argparse.Namespace) -> int:
@@ -179,10 +178,10 @@ def cmd_runs_show(args: argparse.Namespace) -> int:
     # The unattributed pool is not a run: with nothing in it there is no record to show.
     if run_id == UNATTRIBUTED and not run.events:
         print(f"no unattributed events in {root}")
-        return 0
+        return exitcodes.OK
     for line in runs.run_show_lines(run, compose.maps_for_stored_runs()):
         print(line)
-    return 0
+    return exitcodes.OK
 
 
 @dataclass(frozen=True)
@@ -194,11 +193,12 @@ class Duration:
 
 
 def duration(value: str) -> Duration:
-    """argparse type for --older-than: a whole number of hours or days, `12h` or `30d`."""
+    """argparse type for --older-than: a whole number of hours or days, `12h` or `30d`. Not
+    `0h`: every run would be older than it, the one still starting included."""
     match = re.fullmatch(r"(\d+)([hd])", value)
-    if match is None:
+    if match is None or int(match[1]) == 0:
         raise argparse.ArgumentTypeError(
-            f"{value!r}: give a whole number of hours or days, as 12h or 30d"
+            f"{value!r}: give a positive whole number of hours or days, as 12h or 30d"
         )
     return Duration(value, int(match[1]) * DURATION_UNITS[match[2]])
 
@@ -228,7 +228,7 @@ def cmd_runs_prune(args: argparse.Namespace) -> int:
         return exitcodes.ERROR
     if not run_ids:
         print(f"no runs older than {args.older_than.typed} in {root}")
-        return 0
+        return exitcodes.OK
     return _remove(args, root, run_ids, dry_run=args.dry_run)
 
 
@@ -248,7 +248,7 @@ def _remove(args: argparse.Namespace, root: Path, run_ids: list[str], *, dry_run
     bodies = len(removal.blobs)
     stored = f"{bodies} stored {'body' if bodies == 1 else 'bodies'}"
     print(f"{verb} {plural(len(removal.runs), 'run')} and {stored} no other run uses")
-    return 0
+    return exitcodes.OK
 
 
 def cmd_compare(args: argparse.Namespace) -> int:

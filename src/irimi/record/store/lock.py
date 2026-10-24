@@ -21,6 +21,10 @@ class StoreLocked(OSError):
     """Another process holds this store's `serve.lock`: another `serve` writes it."""
 
 
+class StoreBusy(StoreLocked):
+    """Another irimi process is writing this store: a shadow, a replay or a serve."""
+
+
 class ServeLock:
     """A root's `serve.lock`, held exclusively by this process until `release()`.
 
@@ -52,6 +56,48 @@ class ServeLock:
 
     def release(self) -> None:
         """Let go of the lock: closing the descriptor releases it. Idempotent."""
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            os.close(fd)
+
+
+class WriterLock:
+    """A lock on a root's directory, held shared by every store writing under it for as long as
+    it writes, and exclusively by whatever deletes runs. An `irimi shadow` takes no `serve.lock`,
+    and a run it is writing may not have ended or touched a file for hours, so this is how
+    deleting runs knows that no run under the root is in progress, nor about to name a blob it
+    deletes. Held by the kernel, so a crashed writer never leaves the root locked."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd: int | None = fd
+
+    @classmethod
+    def share(cls, root: Path) -> "WriterLock":
+        """Take `root`'s lock shared, waiting while runs are being deleted. Raises OSError when
+        `root` cannot be opened."""
+        return cls._take(root, fcntl.LOCK_SH)
+
+    @classmethod
+    def exclude(cls, root: Path) -> "WriterLock":
+        """Take `root`'s lock exclusively. Raises StoreBusy at once when any store writes under
+        it, and OSError when `root` cannot be opened."""
+        try:
+            return cls._take(root, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise StoreBusy(f"another irimi process is writing the trace store {root}") from None
+
+    @classmethod
+    def _take(cls, root: Path, how: int) -> "WriterLock":
+        fd = os.open(root, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, how)
+        except BaseException:
+            os.close(fd)
+            raise
+        return cls(fd)
+
+    def release(self) -> None:
+        """Let go of the lock. Idempotent."""
         fd, self._fd = self._fd, None
         if fd is not None:
             os.close(fd)

@@ -236,7 +236,7 @@ Ideas and bugs go in the [issues](https://github.com/HenryLiu714/Irimi/issues).
 
 **Build fails in pylsqpack** (`error: call to undeclared function '_Py_DecRefShared'`): uv picked a
 free-threaded Python, for which mitmproxy's dependencies have no wheels. Ask for a GIL build:
-`uv tool install --python 3.12 irimi`, or in a clone, `UV_PYTHON=3.14+gil uv sync`.
+`uv tool install --python 3.12 irimi`, or in a clone, `scripts/setup.sh`, which installs one.
 
 ## Contributing, security and license
 

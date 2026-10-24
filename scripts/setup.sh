@@ -13,8 +13,12 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-# mitmproxy's dependencies do not build on a free-threaded Python, which uv may pick for a bare 3.14.
-export UV_PYTHON="${UV_PYTHON:-3.14+gil}"
+# mitmproxy's dependencies do not build on a free-threaded Python, which uv picks for a bare 3.14
+# when it manages one. `3.14+gil` matches only an installed Python, so install a GIL 3.14 first.
+if [ -z "${UV_PYTHON:-}" ]; then
+  uv python find 3.14+gil >/dev/null 2>&1 || uv python install 3.14
+  export UV_PYTHON=3.14+gil
+fi
 
 echo "Syncing project (this downloads Python 3.14 and dependencies on first run)..."
 uv sync

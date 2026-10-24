@@ -21,8 +21,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         # 3.14 is what .python-version pins for development; 3.12 is the floor pyproject promises.
-        # `+gil`, because mitmproxy's dependencies do not build on a free-threaded 3.14.
-        python: ["3.14+gil", "3.12"]
+        # Not `3.14+gil`: uv matches that only to an installed Python and downloads none on Linux.
+        python: ["3.14", "3.12"]
         # 3.13 is a classifier too; one Linux leg is enough to keep that claim true.
         include:
           - os: ubuntu-latest
@@ -33,7 +33,7 @@ jobs:
     # the next `uv run` follows .python-version and rebuilds the venv on 3.14.
     env:
       UV_PYTHON: ${{ matrix.python }}
-      COVERAGE_LEG: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.14+gil' }}
+      COVERAGE_LEG: ${{ matrix.os == 'ubuntu-latest' && matrix.python == '3.14' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -43,7 +43,8 @@ jobs:
           enable-cache: true
       # All groups, so the tests that drive the real stripe and slack-sdk clients run, not skip.
       - run: uv sync --locked --all-groups
-      - run: uv run python -c "import sys; v = '%d.%d' % sys.version_info[:2]; assert v == '${{ matrix.python }}'.removesuffix('+gil'), v"
+      # A GIL build, because mitmproxy's dependencies do not build on a free-threaded 3.14.
+      - run: uv run python -c "import sys, sysconfig; v = '%d.%d' % sys.version_info[:2]; assert v == '${{ matrix.python }}', v; assert not sysconfig.get_config_var('Py_GIL_DISABLED'), 'free-threaded'"
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy

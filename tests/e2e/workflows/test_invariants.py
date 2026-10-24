@@ -5,7 +5,9 @@ Each scenario is held to them under `irimi shadow`, under `irimi serve` and in i
 
 import ast
 import dataclasses
+import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -141,6 +143,10 @@ def test_every_known_bug_marker_takes_one_form():
 
 
 # It runs every scenario bare and in `mode`: a minute alone, and over 120 s on a loaded worker.
+# A macOS runner starts each agent in seconds, past any useful limit; the Linux legs hold it.
+@pytest.mark.skipif(
+    sys.platform == "darwin" and "CI" in os.environ, reason="the Linux CI legs run it"
+)
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("mode", ["shadow", "serve"])
 def test_the_corpus_gives_every_invariant_something_to_catch(run_workflow, mode):

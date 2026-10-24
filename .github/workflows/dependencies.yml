@@ -22,7 +22,7 @@ jobs:
       matrix:
         include:
           - resolution: highest
-            python: "3.14+gil"
+            python: "3.14"
           # The floors are a promise to users on the oldest Python pyproject allows.
           - resolution: lowest-direct
             python: "3.12"

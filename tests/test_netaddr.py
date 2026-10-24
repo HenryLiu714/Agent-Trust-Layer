@@ -1,5 +1,4 @@
-"""`core.netaddr`: which hosts are this machine, which are loopback, and how an authority is
-written."""
+"""`core.netaddr`: which hosts are this machine or loopback, and how an authority is written."""
 
 import pytest
 
@@ -29,7 +28,7 @@ def test_is_loopback_knows_every_spelling_of_loopback():
     "host", ["localhost", "localhost.", "LOCALHOST", "127.0.0.1", "127.1", "0177.0.0.1", "::1"]
 )
 def test_the_three_loopback_predicates_agree_on_every_spelling_of_loopback(host):
-    """One reading of a host underneath all three, so none of them can drift from the others."""
+    """`is_self_host`, `is_loopback` and `Target.is_loopback` agree on every loopback spelling."""
     literal = f"[{host}]" if ":" in host else host
     assert is_self_host(host) and is_loopback(host)
     assert Target.parse(f"http://{literal}:3000").is_loopback
@@ -37,8 +36,10 @@ def test_the_three_loopback_predicates_agree_on_every_spelling_of_loopback(host)
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "::"])
 def test_the_unspecified_address_is_self_but_never_a_local_target(host):
-    """The one intended difference: a request whose Host is 0.0.0.0 reaches irimi's own listener,
-    while a target there reaches this machine only by an accident of the OS."""
+    """`0.0.0.0` is a self Host but never a loopback target.
+
+    A request whose Host is `0.0.0.0` reaches irimi's listener; a target there reaches this machine
+    only by an accident of the OS."""
     literal = f"[{host}]" if ":" in host else host
     assert is_self_host(host)
     assert not is_loopback(host)

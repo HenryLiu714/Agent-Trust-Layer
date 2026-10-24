@@ -1,8 +1,6 @@
 """The trace store on disk: `DirectoryStore` writes, `StoreReader` reads back.
 
-Every test drives the store through its public methods and asserts on what `StoreReader` and the
-files under the root say, so a test here breaks only when what reaches disk changes. The real
-`irimi shadow` over these same files is `tests/e2e/test_trace_roundtrip.py`'s.
+Tests use only public methods and the files; `tests/e2e/test_trace_roundtrip.py` runs it for real.
 """
 
 import dataclasses
@@ -86,7 +84,8 @@ def _tool_call(run_id: str, args) -> ToolCall:
 
 class _StoreOs:
     """The `os` module as the store's modules see it, with the functions a test sets replaced.
-    Patching `os` itself would change it for every thread in the process, pytest's own included."""
+
+    Patching `os` itself would change it for every thread in the process, pytest's included."""
 
     def __getattr__(self, name: str):
         return getattr(os, name)
@@ -167,8 +166,7 @@ def test_the_first_event_of_a_run_with_no_start_creates_a_header_run(root, key):
 
 
 def test_a_start_for_a_header_run_rewrites_its_record(root, key):
-    """A run whose events arrived before its start is a `header` run until the start arrives,
-    which rewrites its record whole and keeps its events."""
+    """A late start rewrites a `header` run's record whole and keeps its events."""
     s = DirectoryStore(root, key)
     s.record(_exchange("r2"))
     s.start_run(dataclasses.replace(_record("r2"), attribution="sdk"))
@@ -180,11 +178,10 @@ def test_a_start_for_a_header_run_rewrites_its_record(root, key):
 
 
 def test_a_start_for_a_run_that_has_ended_is_dropped_and_the_run_kept_whole(root, key):
-    """A start re-posted after its run's end rewrote run.json whole, so the run lost its end, its
-    outcome and its first trigger, and listed `incomplete`. It is dropped instead, counted on
-    the store alone, and the run's files are not rewritten: it lost nothing, so its `dropped_events`
-    stays 0. So it is when the run ended in an earlier process, and the start reaches a store that
-    has never seen it."""
+    """A start posted after its run ended is dropped, counted on the store, and changes nothing.
+
+    The run keeps its end, outcome and first trigger, and its `dropped_events` stays 0, even when
+    it ended in an earlier process."""
     s = DirectoryStore(root, key)
     s.start_run(dataclasses.replace(_record("r1"), attribution="sdk"))
     s.record(_exchange("r1"))
@@ -207,9 +204,9 @@ def test_a_start_for_a_run_that_has_ended_is_dropped_and_the_run_kept_whole(root
 
 
 def test_every_run_a_replay_s_store_starts_is_that_replay_s(root, key):
-    """The process run and an SDK run alike: each record's constructor names the replay, and the
-    store checks it rather than stamping it, so a start that names no replay is dropped, counted
-    on the store alone, with no run directory of its own."""
+    """A replay's store drops a start that does not name the replay, process run or SDK run alike.
+
+    The drop is counted on the store alone, and makes no run directory."""
     trigger = Trigger("handle", "agent:handle", {}, True)
     s = DirectoryStore(root, key, replay_of="rec1")
     s.start_run(RunRecord.process("p1", ["agent"], None, 10.0, replay_of="rec1"))
@@ -236,8 +233,7 @@ def test_every_run_a_replay_s_store_starts_is_that_replay_s(root, key):
 
 
 def test_a_header_run_a_replay_makes_is_that_replay_s(root, key):
-    """A store a replay writes names the run it replays, and so does each header run it makes:
-    `mode: replay` and `replay_of`, by `trace.mode_for`, the rule the process run follows."""
+    """Each header run a replay's store makes is `mode: replay` with the replayed run's id."""
     s = DirectoryStore(root, key, replay_of="rec1")
     s.record(_exchange("r2"))
     s.close()
@@ -247,11 +243,10 @@ def test_a_header_run_a_replay_makes_is_that_replay_s(root, key):
 
 
 def test_a_replay_never_writes_into_the_run_it_replays(root, key):
-    """An agent that names its runs itself - an `Irimi-Run` label, a run id its SDK reuses - names
-    the recorded run again when it is replayed. Appending to that run merged two runs in one
-    directory, and rewrote its run.json as a replay of itself: the recording changed under every
-    later replay of it. The replay's events go to `unattributed/`, flagged, as a run id that names
-    a directory another run holds does, and its start and end are dropped."""
+    """A replay's events naming the run it replays go to `unattributed/`, flagged.
+
+    An agent that names its own runs names the recorded one again on replay; appending would change
+    the recording. The start and end are dropped."""
     s = DirectoryStore(root, key)
     s.start_run(dataclasses.replace(_record("nightly"), attribution="sdk"))
     s.record(_exchange("nightly", "/recorded"))
@@ -271,13 +266,10 @@ def test_a_replay_never_writes_into_the_run_it_replays(root, key):
 
 
 def test_a_replay_writes_only_the_runs_it_makes(root, key):
-    """An agent that names its runs itself names every recorded run again, not only the one
-    replayed: W9 `control_runs` posts five by name, and a replay of one appended to the other four
-    and rewrote each record as the replay's. A replay's store writes only the runs it made:
-    every run already stored is kept byte for byte, and what the replay said of it is filed in
-    `unattributed/`, flagged, its start and end dropped. A run it starts, or makes from a header,
-    is its own, and stays its own after it ends: a late event is still appended. A store that is
-    no replay's resumes an existing run as it always has."""
+    """A replay's store writes only the runs it makes; every stored run is kept byte for byte.
+
+    What the replay says of another stored run goes to `unattributed/`, flagged. A run it starts or
+    makes from a header stays its own after it ends. A store that is no replay's resumes a run."""
     s = DirectoryStore(root, key)
     for run_id in ("replayed", "sibling"):
         s.start_run(dataclasses.replace(_record(run_id), attribution="sdk"))
@@ -325,8 +317,7 @@ def test_a_header_run_started_by_an_event_with_no_clock_has_no_start(root, key):
 
 
 def test_a_header_run_sorts_by_its_first_event_among_runs_that_started(root, key):
-    """A header run once had no start and sorted after every run that had one, so `irimi runs
-    list` hid an agent's labelled runs behind as many process runs as its limit."""
+    """A header run sorts by its first event among runs that started, not after all of them."""
     s = DirectoryStore(root, key)
     for i in range(3):
         s.start_run(_record(f"p{i}", started_at=10.0 + i))
@@ -338,8 +329,7 @@ def test_a_header_run_sorts_by_its_first_event_among_runs_that_started(root, key
 def test_load_run_without_bodies_reads_no_blob_and_still_finds_a_missing_one(
     root, key, monkeypatch
 ):
-    """`irimi runs list` counts events and reads no body: `bodies=False` opens no blob, but a
-    missing or resized one is still damage."""
+    """`bodies=False` opens no blob, but a missing or resized one is still damage."""
     s = DirectoryStore(root, key)
     s.start_run(_record("r1"))
     s.record(_exchange("r1", answer=b"a body only a blob holds"))
@@ -404,9 +394,9 @@ def test_a_tool_calls_args_and_result_are_redacted_and_share_the_runs_seq(root, 
 
 
 def test_an_error_and_a_trigger_name_are_redacted_before_they_reach_disk(root, key):
-    """`ErrorInfo.from_exception` keeps `str(exc)`, and an exception's message may quote the key
-    it refused; a trigger's name is the argv[0] its args repeat. A posted error's type is
-    whatever the client sent, so it is redacted as its message is."""
+    """An error's type and message, and a trigger's name, are redacted before they reach disk.
+
+    An exception's message may quote the key it refused; a posted error's type is the client's."""
     s = DirectoryStore(root, key)
     s.start_run(dataclasses.replace(_record("r1"), trigger=Trigger(SECRET, None, None, True)))
     call = _tool_call("r1", None)
@@ -426,10 +416,9 @@ def test_an_error_and_a_trigger_name_are_redacted_before_they_reach_disk(root, k
 
 
 def test_an_error_is_redacted_whole_and_only_then_cut(root, key):
-    """A key straddling MAX_ERROR_TYPE and one straddling MAX_ERROR_MESSAGE, on a tool call and
-    on an end. Cut first, each kept part is shorter than `ghp_`'s shape, which redaction would
-    not find, so it reached disk. Redacted whole, the stored error is a prefix of the redacted
-    whole, as a stored body is: each key is its whole placeholder, and no part of it is kept.
+    """An error is redacted whole and then cut, so a key across either limit leaves no part.
+
+    Cut first, each kept part would be too short for redaction to find.
     """
     secret = "ghp_" + "S" * 36
     kind = "t" * (limits.MAX_ERROR_TYPE - 30) + "." + secret + ".Boom"
@@ -454,8 +443,7 @@ def test_an_error_is_redacted_whole_and_only_then_cut(root, key):
 
 
 def test_a_run_json_says_the_version_its_lines_are_written_in(root, key):
-    """A caller's record claiming another version would put this writer's lines under a run.json
-    no reader of this version reads (docs/trace-format.md, "Versioning")."""
+    """A run.json says the version its lines are written in, whatever the caller's record claims."""
     s = DirectoryStore(root, key)
     s.start_run(dataclasses.replace(_record("r1"), schema_version=trace.SCHEMA_VERSION + 1))
     s.record(_exchange("r1"))
@@ -546,8 +534,7 @@ def test_a_streamed_body_is_stored_with_its_chunk_lengths(root, key):
 def test_a_streamed_body_cut_at_the_maximum_keeps_the_chunks_of_what_is_stored(
     root, key, monkeypatch
 ):
-    """`_put_body` keeps the first MAX_STORED_BODY bytes, and the chunk lengths are cut at the
-    same byte, so they still split the stored body."""
+    """A streamed body cut at MAX_STORED_BODY has its chunk lengths cut at the same byte."""
     monkeypatch.setattr(writer, "MAX_STORED_BODY", 20)
     s = DirectoryStore(root, key)
     s.record(_streamed(b"a" * 8 + b"b" * 8 + b"c" * 14, (8, 8, 14)))
@@ -561,10 +548,10 @@ def test_a_streamed_body_cut_at_the_maximum_keeps_the_chunks_of_what_is_stored(
 def test_a_stream_redaction_grows_past_the_maximum_is_a_prefix_of_its_redacted_whole(
     root, key, monkeypatch
 ):
-    """The engine keeps at most MAX_STORED_BODY bytes of a stream, but a placeholder can be longer
-    than its secret, so the redacted body can pass the cap again. It is cut like any body: a
-    prefix of the redacted whole, never half a secret, its chunks cut with it, and both flags -
-    the stream was not whole, and neither is the stored body."""
+    """A stream that redaction grows past the cap is cut like any body, its chunks cut with it.
+
+    A placeholder can be longer than its secret. Both flags are set: neither stream nor body is
+    whole."""
     secret = STORE_SECRET_SHORT  # far shorter than its placeholder
     line = b'data: {"text":"' + secret.encode() + b'"}\n'
     redacted_line = line.replace(secret.encode(), redact.placeholder(key, secret).encode())
@@ -644,9 +631,9 @@ def test_an_invalid_run_id_never_starts_or_ends_a_run_or_makes_a_directory(root,
 
 
 def test_two_run_ids_that_differ_only_in_case_never_share_a_directory(root, key):
-    """`Run1` and `run1` are both valid run ids. On a case-insensitive filesystem they are one
-    directory, so the second to arrive is stored unattributed and flagged; on a case-sensitive one
-    each is a run of its own. Either way no directory holds two runs' events."""
+    """Run ids differing only in case never share a directory, even on a case-insensitive disk.
+
+    There the second is stored unattributed and flagged."""
     s = DirectoryStore(root, key)
     s.record(_exchange("Run1", "/first"))
     s.record(_exchange("run1", "/second"))
@@ -729,8 +716,7 @@ def test_a_restarted_store_resumes_seq_after_truncating_a_half_line(root, key):
 
 
 def test_a_damaged_last_seq_does_not_stop_a_restarted_store_writing_the_run(root, key):
-    """`{"seq": 1e400}` parses as infinity, which `int()` refuses with an OverflowError: resuming
-    skips that line as unreadable rather than drop every later event of the run."""
+    """Resuming skips a last line whose `seq` is infinity, rather than drop later events."""
     first = DirectoryStore(root, key)
     first.record(_exchange("r1", "/a"))
     first.close()
@@ -747,8 +733,7 @@ def test_a_damaged_last_seq_does_not_stop_a_restarted_store_writing_the_run(root
 def test_resuming_from_the_tail_truncates_a_half_line_at_its_offset_in_the_file(
     root, key, monkeypatch
 ):
-    """The tail holds the last whole line and a crash's half line after it: the cut is made at the
-    tail's offset plus the end of that line, not at an offset counted from the tail's start."""
+    """A crash's half line is cut at its offset in the file, not at one counted from the tail."""
     first = DirectoryStore(root, key)
     for n in range(3):
         first.record(_exchange("r1", f"/n{n}"))
@@ -768,8 +753,7 @@ def test_resuming_from_the_tail_truncates_a_half_line_at_its_offset_in_the_file(
 
 
 def test_a_run_json_is_on_disk_whole_before_it_is_renamed_into_place(root, key, store_os):
-    """A run.json a crash left empty would read as no version at all, and a restarted store never
-    appends to a run whose version it cannot read: so it is synced before it replaces the last."""
+    """A run.json is synced before it replaces the last, so a crash never leaves it empty."""
     synced: set[int] = set()  # inodes
     renamed: list[bool] = []  # per run.json rename: was the file synced first?
 
@@ -795,8 +779,9 @@ def test_a_run_json_is_on_disk_whole_before_it_is_renamed_into_place(root, key, 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file of mode 000")
 def test_a_run_json_that_cannot_be_read_for_now_does_not_refuse_the_run_for_good(root, key):
-    """Too many open files, say: that event is dropped, and the next one is written. Only a
-    run.json that holds another version, or no version at all, closes its run to this writer."""
+    """A run.json that cannot be read for now (too many open files) drops only that event.
+
+    Only a run.json of another version, or none, closes its run to this writer."""
     first = DirectoryStore(root, key)
     first.start_run(_record("r1"))
     first.close()
@@ -839,12 +824,9 @@ def test_a_run_of_a_newer_schema_version_is_never_appended_to(root, key):
     ids=["replay-of-no-run-id", "replay-naming-no-run", "shadow-naming-a-run"],
 )
 def test_a_run_whose_run_json_cannot_be_decoded_is_never_appended_to(root, key, damage):
-    """A store reopened on a run whose run.json it cannot decode - such as one whose
-    `replay_of` is no run id or disagrees with its `mode` - drops that run's events and its end,
-    as it drops a run of another version's: its lines would sit under a record no reader reads,
-    and its end would write a header record over the damage, a replay's or a shadow run's by
-    whichever field it trusted. Fail closed: the run is left as it was found, and each event is
-    counted dropped."""
+    """A run whose run.json cannot be decoded is left as found, its events and end dropped.
+
+    Its lines would sit under a record no reader reads, and its end would overwrite the damage."""
     (root / "runs/old").mkdir(parents=True)
     damaged = trace.run_to_json(_record("old")) | damage
     (root / "runs/old/run.json").write_text(json.dumps(damaged))
@@ -858,8 +840,7 @@ def test_a_run_whose_run_json_cannot_be_decoded_is_never_appended_to(root, key, 
 
 
 def test_a_run_of_an_older_schema_version_is_never_appended_to(root, key, monkeypatch):
-    """The other direction: this irimi is newer than the run it finds (docs/trace-format.md,
-    "Versioning"). Appending would mix two versions' lines under one run.json."""
+    """A run of an older schema is never appended to, which would mix two versions' lines."""
     first = DirectoryStore(root, key)
     first.record(_exchange("old", "/before"))
     first.close()
@@ -896,8 +877,7 @@ def test_a_failed_blob_write_drops_that_event_and_the_next_one_is_written(root, 
 
 
 def test_a_run_id_that_is_not_a_string_is_a_drop_and_the_writer_goes_on(root, key, monkeypatch):
-    """The writer counts a failure under the event's run id. One that cannot be a dict key raised
-    in that error path and ended the writer thread, silently losing every later event."""
+    """An event whose run id cannot be a dict key is a counted drop, and the writer goes on."""
     monkeypatch.setattr(writer, "CLOSE_TIMEOUT_S", 2.0)
     s = DirectoryStore(root, key)
     s.record(dataclasses.replace(_exchange("r1"), run_id=["not", "a", "string"]))  # type: ignore[arg-type]
@@ -908,9 +888,7 @@ def test_a_run_id_that_is_not_a_string_is_a_drop_and_the_writer_goes_on(root, ke
 
 
 def test_a_call_with_the_wrong_type_is_a_drop_not_a_raise(root, key):
-    """Every public method is a mitmproxy hook's callee or the SDK's, and a raised hook forwards
-    the flow, so a write escapes shadow mode: even a caller breaking the types gets a counted
-    drop, not an exception."""
+    """A call with the wrong types is a counted drop, not a raise (fail-closed hook rule)."""
     s = DirectoryStore(root, key)
     s.record(None)  # type: ignore[arg-type]
     s.record_tool_call(None)  # type: ignore[arg-type]
@@ -922,9 +900,9 @@ def test_a_call_with_the_wrong_type_is_a_drop_not_a_raise(root, key):
 
 
 def test_a_failed_write_never_cuts_off_a_line_another_process_appended(root, key, store_os):
-    """`unattributed/` is shared by every process on a root. A `write` that raised wrote nothing,
-    so there is nothing of this line to cut, and truncating the file to its size before the write
-    would cut off a line another process appended in between."""
+    """A failed write never truncates the shared `unattributed/` file another process appends to.
+
+    A `write` that raised wrote nothing, so there is nothing of this line to cut."""
     other = _exchange(trace.UNATTRIBUTED, "/other-process")
     line = json.dumps(trace.event_to_json(1, other, lambda body: None)) + "\n"
     raced: list[int] = []
@@ -1016,8 +994,7 @@ def test_close_gives_up_on_a_stuck_writer_and_counts_what_it_left(root, key, mon
 
 
 def test_an_abandoned_writer_stops_once_its_write_in_flight_lands(root, key, monkeypatch):
-    """`close()` drained the queue, the sentinel included, when it gave up on the writer. The
-    writer's idle wake-up must see that and end, not poll an empty queue for the process's life."""
+    """A writer `close()` gave up on ends once its write in flight lands, not polling forever."""
     monkeypatch.setattr(writer, "CLOSE_TIMEOUT_S", 0.2)
     monkeypatch.setattr(writer, "SYNC_IDLE_S", 0.01)
     release = threading.Event()
@@ -1038,8 +1015,7 @@ def test_an_abandoned_writer_stops_once_its_write_in_flight_lands(root, key, mon
 
 
 def test_a_second_close_waits_for_the_writer_as_the_first_does(root, key, monkeypatch):
-    """The engine and `irimi shadow` both close the store; whichever returns second must still
-    find the files whole, so a second close does not return while the first is waiting."""
+    """A second `close()` waits for the writer as the first does, so both find the files whole."""
     taken, release = threading.Event(), threading.Event()
     real = DirectoryStore._handle
 
@@ -1073,8 +1049,7 @@ def test_close_is_idempotent_and_an_event_after_it_is_dropped_not_raised(root, k
 
 
 def test_the_queue_is_bounded_in_body_bytes_too(root, key, monkeypatch):
-    """10,000 items of 8 MiB would be 80 GiB waiting on a slow disk. A body that would pass the
-    byte budget is dropped, but one reaching an idle writer's empty queue is always taken."""
+    """A body that would pass the queue's byte budget is dropped, unless the queue is empty."""
     monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", 100)
     taken, release = threading.Event(), threading.Event()
     real = DirectoryStore._handle
@@ -1100,8 +1075,7 @@ def test_the_queue_is_bounded_in_body_bytes_too(root, key, monkeypatch):
 
 
 def test_a_tool_calls_args_and_result_count_against_the_byte_budget(root, key, monkeypatch):
-    """The control endpoint takes a tool call of up to 2 MiB, and 10,000 of them would be 20 GiB
-    waiting: the call as JSON, its args and result included, counts as body bytes do."""
+    """A tool call counts against the byte budget as JSON, its args and result included."""
     size = len(json.dumps(trace.tool_call_to_json(_tool_call("r1", {"x": "y" * 400}))))
     monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", size + size // 2)
     taken, release = threading.Event(), threading.Event()
@@ -1128,9 +1102,7 @@ def test_a_tool_calls_args_and_result_count_against_the_byte_budget(root, key, m
 
 
 def test_a_tool_calls_name_and_id_count_against_the_byte_budget(root, key, monkeypatch):
-    """A posted tool call's name and id are the client's to say too, and either may be nearly all
-    of a 2 MiB post, which counting its args and result alone let through uncounted: the
-    whole call as JSON counts, as a start's whole record does."""
+    """A tool call's name and id count against the byte budget too: either may be 2 MiB."""
     named = dataclasses.replace(_tool_call("r1", None), name="n" * 400)
     size = len(json.dumps(trace.tool_call_to_json(named)))
     monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", size + size // 2)
@@ -1158,9 +1130,9 @@ def test_a_tool_calls_name_and_id_count_against_the_byte_budget(root, key, monke
 
 
 def test_a_runs_start_counts_against_the_byte_budget(root, key, monkeypatch):
-    """The control endpoint takes a start of up to 2 MiB, its trigger's args, and 10,000 of them
-    would be 20 GiB waiting: its record as JSON counts as body bytes do. A start dropped so
-    leaves its run to be made from its first event, a `header` run that says it dropped one."""
+    """A run's start counts against the byte budget as JSON.
+
+    A start dropped for it leaves a `header` run that says it dropped one."""
     started = _record("r1", args={"x": "y" * 400})
     size = len(json.dumps(trace.run_to_json(started)))
     monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", size + size // 2)
@@ -1192,10 +1164,9 @@ def test_a_runs_start_counts_against_the_byte_budget(root, key, monkeypatch):
 def test_an_end_waits_with_its_error_cut_outside_secrets_and_is_never_dropped_for_bytes(
     root, key, monkeypatch
 ):
-    """A posted error may be 2 MiB, and the writer cuts it only once redacted. So it waits
-    cut outside secrets to MAX_QUEUED_ERROR, an end costs the byte budget nothing, and no run
-    loses its end to it: a key across that cut is left out whole, and the stored error is still
-    a prefix of the redacted whole."""
+    """An end waits with its error cut outside secrets to MAX_QUEUED_ERROR, and is never dropped.
+
+    An end costs the byte budget nothing, and the stored error is a prefix of the redacted whole."""
     monkeypatch.setattr(writer, "MAX_QUEUED_BYTES", 100)
     held: list[object] = []
     taken, release = threading.Event(), threading.Event()
@@ -1230,9 +1201,7 @@ def test_an_end_waits_with_its_error_cut_outside_secrets_and_is_never_dropped_fo
 
 
 def test_an_end_whose_error_is_not_text_is_a_drop_on_its_run(root, key):
-    """An end's error is cut as it is queued, so one that is not text - from a caller
-    other than the control endpoint - is dropped there, never raised into the caller, and
-    counted on its run."""
+    """An end whose error is not text is dropped as it is queued and counted on its run."""
     s = DirectoryStore(root, key)
     s.start_run(_record("r1"))
     s.end_run("r1", 3.0, "error", ErrorInfo("x.Boom", None), exit_code=1)  # type: ignore[arg-type]
@@ -1243,10 +1212,9 @@ def test_an_end_whose_error_is_not_text_is_a_drop_on_its_run(root, key):
 
 
 def test_a_start_that_cannot_be_measured_is_a_drop_on_its_run(root, key):
-    """A start is measured as JSON on the caller's thread, so one that is not JSON - args no
-    decoder could have made, from a caller other than the control endpoint - is dropped there,
-    never raised into the caller, and counted on its run, which its first event makes a `header`
-    run, as every dropped start leaves it."""
+    """A start that is not JSON is dropped on the caller's thread, never raised, and counted.
+
+    Its first event makes the run a `header` run, as every dropped start leaves it."""
     s = DirectoryStore(root, key)
     s.start_run(_record("r1", args={"x": {1, 2}}))
     s.record(_exchange("r1"))
@@ -1279,8 +1247,7 @@ def test_the_writer_fsyncs_in_batches_before_close(root, key, monkeypatch, store
 def test_one_long_run_is_fsynced_every_sync_every_writes_not_only_when_it_ends(
     root, key, monkeypatch, store_os
 ):
-    """Counted in distinct files, one run appending to its one events.jsonl never reached a batch,
-    and a week-long run was synced only when it ended."""
+    """One long run is fsynced every SYNC_EVERY writes, not only when it ends."""
     synced: set[int] = set()  # inodes
     monkeypatch.setattr(writer, "SYNC_EVERY", 3)
     monkeypatch.setattr(writer, "SYNC_IDLE_S", 60.0)
@@ -1333,8 +1300,9 @@ def test_stored_files_are_private_to_their_owner(root, key):
 
 
 def test_two_stores_on_one_root_never_interleave_inside_a_line(root, key):
-    """Two processes on the default root share `unattributed/events.jsonl`: each line is one
-    O_APPEND write, so however they race every line parses. Lines far past a buffer's size."""
+    """Two stores on one root never interleave inside a line, even lines far past a buffer.
+
+    Each line in the shared `unattributed/events.jsonl` is one O_APPEND write."""
     big = (("x-note", "n" * 20_000),)
     stores = [DirectoryStore(root, key) for _ in range(2)]
 
@@ -1418,9 +1386,9 @@ def test_a_body_too_big_to_redact_is_not_stored_and_its_exchange_says_so(root, k
 
 
 def test_an_ended_run_is_forgotten_and_a_late_event_reopens_it_from_disk(root, key, monkeypatch):
-    """A long `serve` holds only its open runs. A late event after `end_run` reopens the run:
-    `seq` continues, the outcome stays, and a drop after the end is added to the stored count -
-    once, and to the drop before the end, never counting that one twice."""
+    """An ended run is forgotten, and a late event reopens it from disk.
+
+    `seq` continues, the outcome stays, and a later drop is added to the stored count once."""
     real = files.write_private
 
     def refuse_late_blob(path: Path, data: bytes, **kwargs) -> None:
@@ -1488,10 +1456,7 @@ def test_a_damaged_line_that_is_not_the_last_is_a_trace_format_error(root, key):
 
 
 def test_every_refusal_names_its_file_and_its_line(root, key):
-    """A line that parses but does not decode is named by its file and line, as one that does not
-    parse is: in a run of thousands of events, `'seq' is a string` alone cannot be found. A missing
-    blob is named by the line whose event refers to it, and a run.json's refusal by its file.
-    """
+    """Every refusal names its file and line, a missing blob the line that refers to it."""
     s = DirectoryStore(root, key)
     s.start_run(_record("r1"))
     s.record(_exchange("r1", "/a"))
@@ -1522,10 +1487,9 @@ def test_every_refusal_names_its_file_and_its_line(root, key):
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a directory whatever its mode")
 def test_a_run_irimi_may_not_read_is_an_os_error_not_a_missing_run(root, key, caplog):
-    """`Path.is_file` reads a run.json it may not stat as none, so a `chmod 0` run was `no run X`
-    and vanished from `list_runs` without a word, and `Path.exists` read unattributed events it
-    may not read as none. Each is an OSError, which `runs show` and `compare` print as
-    `could not be read`, and `list_runs` skips the run with a warning, as it skips a damaged one."""
+    """A run irimi may not read is an OSError, not a missing run.
+
+    `runs show` and `compare` say `could not be read`; `list_runs` skips it with a warning."""
     s = DirectoryStore(root, key)
     s.start_run(_record("good"))
     s.start_run(_record("shut"))
@@ -1562,7 +1526,7 @@ def test_a_run_irimi_may_not_read_is_an_os_error_not_a_missing_run(root, key, ca
         with pytest.raises(RunNotFound):
             reader.load_run(run_id)
     # The store itself: one with no `runs/` holds no run, and one irimi may not enter is an
-    # OSError, where `Path.is_dir` read it as none, and `runs list` said `no runs in` it.
+    # OSError, not an empty store.
     assert StoreReader(root / "nowhere").list_runs() == []
     root.chmod(0)
     try:
@@ -1593,8 +1557,7 @@ def test_a_run_json_that_is_not_utf8_is_skipped_by_list_runs_not_raised(root, ke
 
 
 def test_list_runs_skips_a_run_json_that_names_another_run(root, key):
-    """`load_run` answers only the exact id its run.json names, so `list_runs` never lists a run
-    that `load_run` would call not found."""
+    """`list_runs` skips a run.json naming another run, which `load_run` would not find."""
     s = DirectoryStore(root, key)
     s.start_run(_record("r1"))
     s.close()

@@ -54,8 +54,7 @@ def test_shadow_policy_is_named_shadow_and_decides():
 
 
 def test_a_faked_refund_lists_the_webhooks_it_would_have_fired():
-    """At the decision, a faked refund lists `refund.created` and `charge.refunded`, off its
-    route's `fires:`."""
+    """A faked refund lists `refund.created` and `charge.refunded`, from its route's `fires:`."""
     ans = answer_shipped(make_request("POST", path="/v1/refunds"))
     assert ans.answered_by == "fake-L1"
     assert ans.would_fire == ("refund.created", "charge.refunded")
@@ -68,8 +67,7 @@ def test_a_faked_customer_update_lists_its_one_event():
 
 
 def test_a_write_on_an_unmapped_host_lists_nothing():
-    """No route, no `fires:`, so no claim about what the service would have sent. It is still an
-    accepted fake, so this is the `route is None` arm of the one line that sets it."""
+    """A faked write with no route makes no claim about what the service would have sent."""
     ans = answer_shipped(make_request("POST", host="example.invalid", path="/things", body=b"{}"))
     assert ans.answered_by == "fake-L0"
     assert ans.would_fire == ()
@@ -95,9 +93,9 @@ def test_a_live_read_lists_nothing():
     ids=["passed", "not-evaluable", "never-asked"],
 )
 def test_every_precondition_outcome_but_rejected_lists_the_webhooks(reader, outcome):
-    """`precondition` has four states, and three of them mean irimi faked the write: it passed,
-    irimi could not find out, or nothing was asked. All three are accepted writes and list their
-    events; only `rejected` lists nothing."""
+    """A write that passed, could not be checked, or was never checked lists its events.
+
+    Only `rejected` lists nothing."""
     ans = answer(
         ShadowPolicy(reader=reader, maps=SHIPPED),
         refund_request(),
@@ -108,8 +106,7 @@ def test_every_precondition_outcome_but_rejected_lists_the_webhooks(reader, outc
 
 
 def test_a_rejected_write_lists_no_webhooks():
-    """L3 said the service would have refused this refund. Nothing was performed, so nothing
-    would have fired."""
+    """A write the precondition check rejects would have fired nothing."""
     policy = ShadowPolicy(
         reader=canned_reader(json_response(200, charge_document(refunded_so_far=4900))),
         maps=SHIPPED,
@@ -121,8 +118,7 @@ def test_a_rejected_write_lists_no_webhooks():
 
 
 def test_a_replayed_write_lists_no_webhooks():
-    """A replay is the first write's own answer. Its events are already on the first write's
-    exchange; listing them again would promise `refund.created` twice for one refund."""
+    """A retry lists no events: they are already on the first write's exchange."""
     policy = ShadowPolicy(reader=canned_reader(json_response(200, charge_document())), maps=SHIPPED)
     first = ask(policy, refund_request())
     second = ask(policy, refund_request())
@@ -132,9 +128,7 @@ def test_a_replayed_write_lists_no_webhooks():
 
 
 def test_an_idempotency_conflict_lists_no_webhooks():
-    """The service would have refused the reused key, so nothing would have fired. A conflict is
-    not `precondition: rejected`, so a check written against that alone would let it through.
-    """
+    """A reused key the service would refuse fires nothing, though it is not `rejected`."""
     policy = ShadowPolicy(reader=canned_reader(json_response(200, charge_document())), maps=SHIPPED)
     ask(policy, refund_request(b"charge=ch_REAL&amount=100"))
     ans = ask(policy, refund_request(b"charge=ch_REAL&amount=250"))
@@ -145,8 +139,7 @@ def test_an_idempotency_conflict_lists_no_webhooks():
 
 
 def test_a_delegated_write_lists_no_webhooks():
-    """The target performed the write, or did not; irimi built nothing and claims nothing - the
-    same reason `report._fidelity` refuses to print `L2` for one."""
+    """A write sent to a target lists nothing: irimi built no answer, so it claims nothing."""
     index = shipped_with_targets(
         [("api.stripe.com", "/v1/refunds", "http://127.0.0.1:3000/refund")]
     )

@@ -41,14 +41,10 @@ def test_a_refund_of_a_fully_refunded_charge_is_answered_with_stripes_own_refusa
 
 
 def test_stripe_python_raises_invalid_request_error_off_the_modeled_refusal():
-    """Against the real SDK, the modeled refusal is not merely Stripe-shaped, it is
-    what makes stripe-python raise the error the agent's `except` clause is already written for.
+    """stripe-python raises `InvalidRequestError` on irimi's modelled refusal.
 
-    `stripe` is not a dependency of this project, so this is skipped in the plain dev venv;
-    `uv sync --group examples` installs it, the same note as
-    `test_stripe_python_parses_the_faked_refund`. The SDK's own error factory is used rather than
-    a hand-rolled mapping, so a change in how stripe-python classifies a 400 fails here.
-    """
+    The SDK's own error factory is used, so a change in how stripe-python classifies a 400 fails
+    here. Skipped without `stripe`."""
     pytest.importorskip("stripe")
     import stripe
     from stripe._api_requestor import _APIRequestor
@@ -65,9 +61,7 @@ def test_stripe_python_raises_invalid_request_error_off_the_modeled_refusal():
 
 
 def test_a_policy_with_no_reader_does_not_do_l3_at_all():
-    """A bare `ShadowPolicy()` asks nothing, so it claims nothing: the refund is the ordinary L1
-    fixture and the outcome is None, not `not_evaluable`. Every other bare construction in the
-    suite relies on this."""
+    """A policy with no reader makes no check: the refund is its fixture and the outcome None."""
     request = refund_request()
     ans = answer(ShadowPolicy(), request, classify(request, SHIPPED))
     assert ans.precondition is None
@@ -78,8 +72,7 @@ def test_a_policy_with_no_reader_does_not_do_l3_at_all():
 
 
 def test_asked_and_could_not_tell_is_not_the_same_as_never_asked():
-    """The two states the whole tri-state rests on, side by side: a reader that answered with a
-    body irimi cannot use is `not_evaluable`, and a policy that had no reader is None."""
+    """An unusable check answer is `not_evaluable`; a policy that never checked is None."""
     request = refund_request()
     asked = checked(canned_reader(json_response(200, ["not", "an", "object"])), request)
     assert asked.precondition == "not_evaluable"
@@ -102,16 +95,14 @@ def test_a_precondition_read_that_429s_is_not_evaluable_and_is_still_recorded():
 
 
 def test_a_passed_check_carries_the_charges_currency_onto_the_answer():
-    """`Refund.create(charge=, amount=)` names no currency; the charge irimi read
-    to decide about it does, and that is the only honest source there is."""
+    """A passed check takes the currency from the charge irimi read; the refund names none."""
     ans = checked(canned_reader(json_response(200, charge_document())), refund_request())
     assert ans.precondition == "passed"
     assert ans.currency == "usd"
 
 
 def test_a_rejected_check_carries_it_too():
-    """`report.summary.write_sentence` renders the map's `human:` sentence before it branches on the
-    rejection, so the `✗` line prints an amount as well and needs the same currency."""
+    """A rejected check carries the currency too, since the `✗` line prints an amount."""
     ans = checked(
         canned_reader(json_response(200, charge_document(refunded_so_far=4900))), refund_request()
     )
@@ -120,7 +111,7 @@ def test_a_rejected_check_carries_it_too():
 
 
 def test_a_policy_with_no_reader_offers_no_currency():
-    """Never asked, so nothing claimed - the same rule `precondition: None` follows."""
+    """A policy that never checked claims no currency."""
     request = refund_request()
     ans = answer(ShadowPolicy(), request, classify(request, SHIPPED))
     assert ans.currency == ""
@@ -136,17 +127,14 @@ def test_a_policy_with_no_reader_offers_no_currency():
     ],
 )
 def test_a_read_that_never_produced_a_document_offers_no_currency(answer):
-    """The currency comes only from a document irimi actually read. None of these is
-    one, so the amount still prints as the write sent it."""
+    """A check read that yields no document offers no currency."""
     ans = checked(canned_reader(answer), refund_request())
     assert ans.precondition == "not_evaluable"
     assert ans.currency == ""
 
 
 def test_a_verdict_that_could_not_tell_still_knows_what_the_charge_is_in():
-    """A check that could not decide still carries the currency: the charge WAS read and
-    parsed, so the currency is known. Whether irimi could decide the service
-    would have taken the write is a different question from what the write is denominated in."""
+    """A check that could not decide still carries the currency of the charge it read."""
     charge = charge_document()
     charge["amount_refunded"] = "not a number"  # `_refund_verdict` -> NOT_EVALUABLE
     ans = checked(canned_reader(json_response(200, charge)), refund_request())
@@ -168,15 +156,13 @@ def test_a_verdict_that_could_not_tell_still_knows_what_the_charge_is_in():
     ids=["raises", "none", "not-json", "not-an-object", "404", "500", "503"],
 )
 def test_a_reader_that_cannot_tell_leaves_the_write_faked_and_not_evaluable(answer):
-    """Only a 200 carrying a JSON object is evaluable. Everything else is irimi
-    saying it could not find out, and the write is faked at its ordinary level regardless."""
+    """Only a 200 with a JSON object is evaluable; otherwise the write is faked as usual."""
     ans = checked(canned_reader(answer), refund_request())
     assert ans.precondition == "not_evaluable"
     assert ans.answered_by == "fake-L1"
     assert ans.response.status == 200
     assert json.loads(ans.response.body)["object"] == "refund"
-    # The read was attempted, so it is on the record whatever came of it - with no response when
-    # the reader got none, the way `IrimiAddon.error` records a flow that never completed.
+    # An attempted read is recorded whatever came of it, with no response when it got none.
     (read,) = ans.issued
     assert (read.issued_by, read.kind, read.answered_by) == ("engine", "read", "live")
     expected = answer if isinstance(answer, Response) else None
@@ -184,9 +170,10 @@ def test_a_reader_that_cannot_tell_leaves_the_write_faked_and_not_evaluable(answ
 
 
 def test_the_runs_own_earlier_refund_is_what_makes_the_second_one_rejected():
-    """The precondition check sees the run's own writes. The real charge says `refunded: false`
-    both times - the first refund was never made - and the overlay applying it is the only thing
-    that can turn the second into the refusal Stripe would have given."""
+    """The run's own earlier faked refund makes the precondition check reject the second.
+
+    The live charge says `refunded: false` both times; applying the first refund turns the second
+    into Stripe's refusal."""
     request = refund_request()
     cls = classify(request, SHIPPED)
     first = checked(canned_reader(json_response(200, charge_document())), request)
@@ -209,7 +196,7 @@ def test_the_runs_own_earlier_refund_is_what_makes_the_second_one_rejected():
     assert second.precondition == "rejected"
     assert second.rejection_code == "charge_already_refunded"
     assert second.response.status == 400
-    # And without the log the very same live charge passes: the log is the cause, nothing else.
+    # Without the log the same live charge passes, so the log is the cause.
     assert (
         checked(canned_reader(json_response(200, charge_document())), request).precondition
         == "passed"
@@ -217,7 +204,7 @@ def test_the_runs_own_earlier_refund_is_what_makes_the_second_one_rejected():
 
 
 def test_an_overlay_that_knows_it_is_incomplete_makes_the_check_not_evaluable(monkeypatch):
-    """A write checked against a world irimi knows is incomplete was not checked."""
+    """A check against state irimi knows is incomplete is `not_evaluable`."""
     stripe = services.REGISTRY["stripe"]
     partial = replace(stripe, effects=lambda read, doc, writes: services.Applied(doc, partial=True))
     monkeypatch.setitem(services.REGISTRY, "stripe", partial)
@@ -246,9 +233,9 @@ def test_an_overlay_that_knows_it_is_incomplete_makes_the_check_not_evaluable(mo
 
 
 def test_the_probe_carries_the_writes_credentials_and_scope_and_nothing_else():
-    """Credentials and account/version scope are what make the read see the world the write
-    would have been made in. The rest of the agent's headers are not copied: an
-    `Idempotency-Key` on a GET is a request the agent never made."""
+    """irimi's check read carries the write's credentials and scope headers and nothing else.
+
+    Copying the rest would make a request the agent never made, such as a keyed GET."""
     reader = canned_reader(json_response(200, charge_document()))
     checked(reader, refund_request())
     (probe,) = reader.asked
@@ -290,8 +277,7 @@ def test_a_delegated_write_on_a_checked_route_is_not_evaluable_and_issues_no_rea
 
 
 def test_a_probe_the_maps_do_not_call_a_read_is_refused(monkeypatch):
-    """A probe may make read operations only, which is enforced by asking the maps, not by the
-    verb."""
+    """A check read the maps do not class as a read is refused, whatever its verb."""
     check = services.Check(
         probe=lambda proposal: services.Probe("refunds.create", "POST", "/v1/refunds"),  # type: ignore[arg-type]
         verdict=lambda proposal, document: None,
@@ -306,8 +292,7 @@ def test_a_probe_the_maps_do_not_call_a_read_is_refused(monkeypatch):
 
 @pytest.mark.parametrize("channel", ["#general", "general"])
 def test_a_slack_post_to_a_channel_name_is_not_probed(channel):
-    """`conversations.info` only knows ids, so probing a name would report a
-    rejection Slack would never have made."""
+    """A Slack post to a channel name is not checked: `conversations.info` only knows ids."""
     reader = canned_reader()
     ans = checked(reader, slack_post_request(channel))
     assert ans.precondition == "not_evaluable"
@@ -329,9 +314,7 @@ def test_a_slack_post_to_a_channel_id_is_probed_with_conversations_info():
 
 @pytest.mark.parametrize("error", ["missing_scope", "invalid_auth", "ratelimited"])
 def test_a_slack_error_irimi_cannot_read_is_not_evaluable_and_the_post_is_still_faked(error):
-    """Slack answers these at HTTP 200, so the policy's own non-200 rule never sees them. Before
-    the verdict had a third state they were recorded `passed`, and the summary then printed
-    `L3 preconditions passed` for a write irimi had not managed to check at all."""
+    """A Slack error answered at HTTP 200 is `not_evaluable`, not `passed`."""
     reader = canned_reader(json_response(200, {"ok": False, "error": error}))
     ans = checked(reader, slack_post_request("C0123"))
     assert ans.precondition == "not_evaluable"
@@ -342,7 +325,7 @@ def test_a_slack_error_irimi_cannot_read_is_not_evaluable_and_the_post_is_still_
 
 
 def test_a_charge_the_check_could_not_read_is_not_evaluable_rather_than_passed():
-    """The Stripe half of the same rule: a 200 that is not a charge irimi can read."""
+    """A 200 that is not a charge irimi can read is `not_evaluable`, not `passed`."""
     reader = canned_reader(json_response(200, {"object": "list", "data": []}))
     ans = checked(reader, refund_request())
     assert ans.precondition == "not_evaluable"
@@ -368,7 +351,7 @@ def test_a_rejection_carries_the_level_the_refund_would_have_been_answered_at():
 
 
 def test_a_rejection_of_a_write_with_no_fixture_is_honestly_l0():
-    """There is no `fake-L3`, and `reactions.add` has no fixture to be L1 from."""
+    """A rejection of a write with no fixture is an echo; there is no `fake-L3`."""
     request = make_request("POST", host="slack.com", path="/api/reactions.add", body=b"{}")
     fake = services.fake_rejection(classify(request, SHIPPED), {"ok": False, "error": "x"})
     assert (fake.answered_by, fake.flags) == ("fake-L0", ())

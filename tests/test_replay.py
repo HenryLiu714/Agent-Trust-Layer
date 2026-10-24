@@ -1,6 +1,6 @@
-"""`irimi.replay`, the pure part of `irimi replay`: what a replay runs for a stored run
-(`plan`), why it refuses one (`not_replayable`), and what it says once it has run (`outcome`),
-over records and events built by hand. `tests/cli/test_replay.py` runs the command itself."""
+"""`irimi.replay`'s pure part: `plan`, `not_replayable` and `outcome`, over hand-built records.
+
+`tests/cli/test_replay.py` runs the command itself."""
 
 from dataclasses import replace
 
@@ -56,9 +56,9 @@ def test_call_and_args_replace_the_entrypoint_and_the_args_and_the_trigger_says_
 
 
 def test_a_call_of_another_function_names_the_trigger_after_it_as_the_sdk_names_one():
-    """The replay's run names the function it called, by its `module:qualname`, as `@sdk.trigger`
-    names a run, never the recorded trigger that did not run. The recorded entrypoint called again
-    keeps the recorded name, which `@sdk.trigger(name=...)` may have given."""
+    """A replay's run is named `module:qualname` after the function it called, as a trigger is.
+
+    Calling the recorded entrypoint again keeps the recorded name, which `name=` may have set."""
     named = _record(replace(TRIGGER, name="refund"))
     plan = replay_plan.plan(named, [], "agent:Desk.lookup", {"customer": "c"})
     assert plan.trigger == Trigger(
@@ -118,8 +118,7 @@ def test_a_process_run_s_argv_is_no_function_s_parameters():
 
 
 def test_a_replay_s_run_of_a_trigger_taking_argv_is_called_with_its_args_not_run_as_argv():
-    """A replay's run is a process run that keeps the trigger it called: its entrypoint says its
-    args are that function's, even a parameter named `argv`."""
+    """A replay's run keeps the trigger it called, whose args are the function's, even `argv`."""
     called = Trigger("main", "agent:main", {"argv": ["agent", "-v"]}, True)
     record = replace(RunRecord.process("src", ["python"], None, 1.0), trigger=called)
     plan = replay_plan.plan(record, [], "agent:other", None)
@@ -149,8 +148,7 @@ def test_a_process_run_is_its_argv_run_again():
 
 
 def test_a_process_run_s_replay_says_it_reran_the_argv_alone():
-    """The environment, cwd and stdin the run had are not recorded, so a replay that refunds
-    another amount may only have lost an environment variable."""
+    """A process run's replay says it re-ran the argv only: env, cwd and stdin are not recorded."""
     record = RunRecord.process("src", ["python", "agent.py", "-v x"], None, 1.0)
     replayed = _run(replace(record, run_id="new", replay_of="src"), [])
     rerun = ("python", "agent.py", "-v x")
@@ -232,8 +230,7 @@ def test_args_not_recorded_replayably_are_refused_unless_args_are_given():
 def _exchange(
     path: str, flags: tuple[str, ...], issued_by: str = "agent", answered_by: str | None = None
 ) -> Exchange:
-    """A read of a Stripe charge in the replay `new`, answered from the recording when `flags`
-    says so and live otherwise."""
+    """A Stripe charge read in the replay `new`, from the recording when `flags` says so."""
     if answered_by is None:
         answered_by = "recording" if "from-recording" in flags else "live"
     return builders.exchange(
@@ -257,9 +254,9 @@ def _run(record: RunRecord, events: list) -> StoredRun:
 
 
 def test_the_divergence_is_the_first_agent_exchange_or_read_tool_the_recording_missed():
-    """A precondition read irimi issued and a write tool's stand-in are never one, and are not
-    counted, so the divergence is numbered among the calls the totals count; a read tool that ran
-    for real is one."""
+    """The divergence is numbered among the calls the totals count.
+
+    irimi's check read and a write tool's fake are not counted; a read tool that ran for real is."""
     events = [
         _exchange("/v1/charges/a", ("from-recording",)),
         _exchange("/v1/charges/p", ("replay-miss",), issued_by="engine"),
@@ -307,8 +304,7 @@ def test_a_replay_that_missed_nothing_says_so_and_names_both_versions_and_other_
 
 
 def test_a_run_with_no_trigger_replayed_by_a_command_says_no_args_differ():
-    """A `header` run recorded no trigger, and its replay by `-- CMD` records the command line, as
-    a process run does: no args were given, so none are said to differ."""
+    """A `header` run replayed by `-- CMD` was given no args, so none are said to differ."""
     source = _run(_record(None, "header"), [])
     record = RunRecord.process("new", ["python", "agent.py"], None, 1.0)
     replayed = _run(replace(record, replay_of="src"), [])
@@ -325,8 +321,9 @@ def _new(events: list) -> StoredRun:
 
 
 def test_a_replay_that_made_fewer_calls_than_its_recording_says_how_many_it_never_made():
-    """A child that stopped early is no replay that answered every call. A write cut before
-    any policy was asked carries no replay flag, and was made all the same."""
+    """A child that stopped early did not answer every call from the recording.
+
+    A write cut before any policy was asked carries no replay flag, and was made all the same."""
     recorded = [_exchange("/v1/charges/a", ()), _tool("read", "real"), _tool("write", "shadow")]
     hit = _exchange("/v1/charges/a", ("from-recording",))
     outcome = replay_report.outcome(
@@ -336,7 +333,7 @@ def test_a_replay_that_made_fewer_calls_than_its_recording_says_how_many_it_neve
         "  no divergence, but 1 of the recording's calls was never made",
         "  1 from the recording · 0 missed",
     ]
-    # A delegated answer is the target's, never looked up in the recording: not a call missed.
+    # A target's answer is never looked up in the recording: not a call missed.
     delegated = _exchange("/v1/charges/d", (), answered_by="delegated")
     outcome = replay_report.outcome(
         _run(_record(), [delegated]), _new([]), replay_report.Ended(0), None
@@ -350,8 +347,7 @@ def test_a_replay_that_made_fewer_calls_than_its_recording_says_how_many_it_neve
 
 
 def test_a_trigger_that_raised_is_an_agent_that_ran():
-    """A call the child could not make has no outcome: `irimi replay` stops before one
-    (`test_replay_cli`)."""
+    """A call the child could not make has no outcome: `irimi replay` stops before one."""
     raised = CallResult(True, ErrorInfo("builtins.KeyError", "'k'"))
     ended = replay_report.outcome(
         _run(_record(), []), _new([]), replay_report.Ended(1, raised), None

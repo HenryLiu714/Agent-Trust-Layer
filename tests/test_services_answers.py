@@ -21,8 +21,7 @@ from tests.support.decisions import SHIPPED, answer_shipped, make_request
 
 
 def test_unmapped_write_reflects_its_own_fields_and_nothing_else():
-    """Nothing matched, so there is no id to mint, and the echo of a service irimi has no shape
-    for carries none of Stripe's fields."""
+    """An unmapped write's echo carries its own fields only: no minted id, no Stripe fields."""
     ans = answer_shipped(
         make_request(
             "POST",
@@ -80,9 +79,9 @@ def test_a_minted_id_overwrites_a_reflected_field_of_the_same_name():
 
 
 def test_livemode_is_overwritten_rather_than_taken_from_the_fixture():
-    """Every shipped fixture already says `false`, so the rule is only visible against one that
-    does not - and a fixture regenerated from a live-mode example would otherwise tell an agent
-    its shadow write happened on the real ledger."""
+    """A fixture answer always says `livemode: false`, whatever the fixture holds.
+
+    A fixture regenerated from a live-mode example must not tell an agent its write was real."""
     route = servicemaps.Route(
         method="POST", path="/v1/things", operation="things.create", kind="write", fixture="thing"
     )
@@ -113,21 +112,17 @@ def test_slack_write_gets_slacks_own_envelope():
 
 
 def test_two_slack_writes_in_the_same_second_get_different_timestamps():
-    """Slack uses `ts` as a message's identifier and as `thread_ts`, so a collision is two
-    messages that are the same message. Random six digits collide 9% of the time in 200,000
-    draws; a counter lets a run post a million messages a second before one repeats."""
+    """Every minted Slack `ts` is unique, since `ts` is a message's identifier."""
     clock = services.TsClock()
     seen = [clock.mint() for _ in range(5_000)]
     assert len(set(seen)) == len(seen)
-    # And increasing, because that is the other half of what a `ts` means: real ones sort by time,
-    # so code that orders a transcript by `ts` reads the same answer here as it would from Slack.
+    # Increasing too: real `ts` values sort by time, and agents order transcripts by them.
     assert [float(ts) for ts in seen] == sorted(float(ts) for ts in seen)
     assert all(re.fullmatch(r"\d+\.\d{6}", ts) for ts in seen)
 
 
 def test_a_slack_timestamp_still_names_the_current_second(monkeypatch):
-    """The counter must not drift off the clock: a `ts` is a real epoch time, and an SDK that
-    renders one as a date has to get today."""
+    """A minted `ts` stays on the current second, since an SDK may render it as a date."""
     monkeypatch.setattr(slack_answers.time, "time", lambda: 1_700_000_000.9)  # type: ignore[attr-defined]
     clock = services.TsClock()
     assert clock.mint() == "1700000000.000000"
@@ -135,7 +130,7 @@ def test_a_slack_timestamp_still_names_the_current_second(monkeypatch):
 
 
 def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
-    """slack_sdk 3.x sends `application/json;charset=utf-8`, not a form - so parse both."""
+    """A Slack write sent as JSON, as slack_sdk 3.x sends it, is read as well as a form."""
     ans = answer_shipped(
         make_request(
             "POST",
@@ -151,9 +146,7 @@ def test_slack_write_reads_the_json_body_slack_sdk_actually_posts():
 
 
 def test_a_threaded_post_answers_with_the_thread_it_was_posted_in():
-    """A reply's faked `message` carries the posted `thread_ts`. Real Slack puts it there, and
-    irimi knows the value exactly - the caller posted it. The fixture names the field so that
-    `generic.reflect_over` has something to write over."""
+    """A faked reply's `message` carries the posted `thread_ts`, as real Slack's does."""
     ans = answer_shipped(
         make_request(
             "POST",
@@ -166,15 +159,12 @@ def test_a_threaded_post_answers_with_the_thread_it_was_posted_in():
     body = json.loads(ans.response.body)
     assert ans.answered_by == "fake-L1"
     assert body["message"]["thread_ts"] == "1700000000.000100"
-    # The envelope's own fields are unchanged: `ts` is minted and is the reply's identity, not the
-    # thread's, so the two must differ.
+    # `ts` is minted and names the reply, not the thread, so the two differ.
     assert body["message"]["ts"] == body["ts"] != body["message"]["thread_ts"]
 
 
 def test_a_top_level_post_answers_with_no_thread_ts_key_at_all():
-    """A top-level post's faked `message` has no `thread_ts` key. The fixture holds `thread_ts` as
-    `null` so a posted value can land on it, and `reflect_over` reflects over a `null`. Shipping
-    the placeholder would send `thread_ts: null`, which real Slack never sends."""
+    """A faked top-level post's `message` has no `thread_ts` key, never `thread_ts: null`."""
     ans = answer_shipped(
         make_request(
             "POST",
@@ -190,8 +180,7 @@ def test_a_top_level_post_answers_with_no_thread_ts_key_at_all():
 
 
 def test_slack_sdk_parses_a_threaded_and_a_top_level_faked_post():
-    """slack_sdk reads both faked posts' `thread_ts` as Slack sends it. The SDK is what an agent
-    actually reads the field through, and a `None` where it expects a string would break it."""
+    """slack_sdk reads `thread_ts` from a faked reply and a faked top-level post as Slack's own."""
     slack_sdk = pytest.importorskip("slack_sdk")
 
     def answer(body: bytes) -> dict:
@@ -223,10 +212,10 @@ def test_slack_sdk_parses_a_threaded_and_a_top_level_faked_post():
 
 
 def test_an_unlisted_slack_route_does_not_get_the_slack_envelope():
-    """`ok: true` is a claim of success, and we only know what success looks like for a route the
-    maps claim. Answering an unmapped call with the envelope sends slack_sdk down its success
-    branch into an uncatchable crash later (`files_upload_v2` reads `upload_url = None` and dies
-    inside urllib); the generic echo leaves it raising the SlackApiError callers already catch."""
+    """An unlisted Slack route gets the generic echo, not an `ok: true` envelope.
+
+    A false success sends slack_sdk into a later crash (`files_upload_v2` reads `upload_url =
+    None`); the echo makes it raise the `SlackApiError` callers already catch."""
     ans = answer_shipped(
         make_request("POST", host="slack.com", path="/api/files.getUploadURLExternal")
     )
@@ -234,9 +223,7 @@ def test_an_unlisted_slack_route_does_not_get_the_slack_envelope():
 
 
 def test_reactions_add_answers_the_bare_ok_slack_really_sends():
-    """Slack answers reactions.add with `{"ok": true}` and nothing else. The `ts` and `channel`
-    a one-shape envelope would add here are chat.postMessage's, and an agent that read the `ts`
-    of its own reaction as a message id would be reading a field the real API never sends."""
+    """`reactions.add` is answered `{"ok": true}` alone, with no `chat.postMessage` fields."""
     ans = answer_shipped(
         make_request(
             "POST",
@@ -251,9 +238,7 @@ def test_reactions_add_answers_the_bare_ok_slack_really_sends():
 
 
 def test_files_upload_answers_the_bare_ok_too():
-    """Same rule as reactions.add: the generic shape's top-level `ts` is a field files.upload
-    never returned. Having no `fixture:` is not having no known shape - the `file` object is
-    left out because Slack retired the method, not because irimi does not know the envelope."""
+    """`files.upload` is answered with the bare `ok` too; the method is retired."""
     ans = answer_shipped(
         make_request(
             "POST",
@@ -272,13 +257,10 @@ def test_files_upload_answers_the_bare_ok_too():
     [(0, "/v1/charges/ch_1/refund"), (1, "/v1/refunds")],
 )
 def test_a_faker_that_fails_still_answers_locally(monkeypatch, broken, path):
-    """A raising policy makes mitmproxy forward the flow, and a forwarded write is a real write.
+    """A body builder that raises still leaves the write answered by irimi (fail-closed hook rule).
 
-    Both bodies, because L1 put a second one on the path: `/v1/refunds` is a fixture route and
-    the unmapped Stripe path is an L0 one, so each parameter breaks the function its own request
-    actually reaches. Breaking only the L0 body would leave the L1 route answering normally and
-    the test passing while proving nothing about it.
-    """
+    Each case breaks the builder its own request reaches: the echo for the unmapped path, the
+    fixture for `/v1/refunds`."""
 
     def boom(*args, **kwargs):
         raise RuntimeError("boom")
@@ -313,7 +295,7 @@ def test_a_minted_id_has_its_prefix_and_is_unique():
 
 
 def test_every_shipped_route_that_mints_an_id_names_a_real_object():
-    """The derivation rule has to hold for the routes we actually ship, not just for Stripe."""
+    """Every shipped route that mints an `id` derives a real object name from its operation."""
     for service in SHIPPED.services:
         for route in service.routes:
             if "id" in route.ids:
@@ -321,11 +303,7 @@ def test_every_shipped_route_that_mints_an_id_names_a_real_object():
 
 
 def test_stripe_python_parses_the_faked_refund():
-    """stripe-python parses irimi's faked refund into a `Refund` with the fields it sent.
-
-    `stripe` is not a dependency of this project, so this test is skipped in the plain dev venv.
-    `uv sync --group examples` installs it, after which `uv run pytest -q -k stripe` runs it.
-    """
+    """stripe-python parses irimi's faked refund into a `Refund` with the fields it sent."""
     stripe = pytest.importorskip("stripe")
     ans = answer_shipped(
         make_request(
@@ -359,8 +337,7 @@ def test_stripe_python_parses_the_faked_refund():
     ],
 )
 def test_a_write_that_names_its_resource_echoes_that_id(path, named, operation, object_name):
-    """The live API answers an update or a cancel with the id it was given. Minting a fresh one
-    hands the agent an id for a resource that never existed, which it then logs or retrieves."""
+    """An update or a cancel echoes the id its path names, as the live API does, not a fresh one."""
     request = make_request("POST", path=path)
     assert classify(request, SHIPPED).operation == operation
     body = json.loads(answer_shipped(request).response.body)
@@ -376,8 +353,7 @@ def test_a_create_still_mints_every_id_it_names():
 
 
 def test_a_captured_segment_that_is_not_this_ids_prefix_is_not_used():
-    """`named_id` matches on the id prefix, so an unrelated captured segment cannot become the
-    id. There is no such shipped route, so the case is built here rather than left untested."""
+    """A captured segment without the id's prefix never becomes the id."""
     route = servicemaps.Route(
         method="POST",
         path="/v1/widgets/{widget}/parts/{part}",
@@ -392,9 +368,9 @@ def test_a_captured_segment_that_is_not_this_ids_prefix_is_not_used():
 
 
 def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
-    """`sub_` matches `sub_sched_1` before `sub_2` - a real Stripe pair, and the first capture is
-    the wrong one. An id is its prefix plus one run of id characters, so the second `_` in
-    `sub_sched_1` is what rules it out."""
+    """When one prefix matches two segments, the id-shaped one wins (`sub_2`, not `sub_sched_1`).
+
+    An id is its prefix plus one run of id characters, so the second `_` rules out `sub_sched_1`."""
     route = servicemaps.Route(
         method="POST",
         path="/v1/subscription_schedules/{schedule}/subscriptions/{subscription}",
@@ -404,14 +380,14 @@ def test_the_id_shaped_capture_wins_when_one_prefix_matches_two_segments():
     )
     path = "/v1/subscription_schedules/sub_sched_1/subscriptions/sub_2"
     assert generic.named_id(route, path, "sub_") == "sub_2"
-    # And the longer prefix still finds its own segment, which the shorter one must not steal.
+    # The longer prefix still finds its own segment.
     assert generic.named_id(route, path, "sub_sched_") == "sub_sched_1"
 
 
 def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
-    """A PaymentIntent's client secret starts with the id's own prefix
-    (`pi_ABC_secret_XYZ`), so prefix matching alone hands it back as `id` - a credential in the
-    one field an agent is most likely to log or store."""
+    """A client secret (`pi_ABC_secret_XYZ`) is never echoed back as the resource id.
+
+    It starts with the id's prefix, and an agent is most likely to log or store the `id` field."""
     route = servicemaps.Route(
         method="POST",
         path="/v1/payment_intents/{payment_intent}/cancel",
@@ -429,8 +405,7 @@ def test_a_client_secret_is_never_echoed_back_as_the_resource_id():
 
 
 def test_a_percent_encoded_id_is_still_the_id_the_request_names():
-    """`cus%5FREAL123` is the same customer as `cus_REAL123` to the service, so reading the raw
-    segment would mint a fresh id where the request names one, for any caller that over-encodes."""
+    """A percent-encoded id (`cus%5FREAL123`) is decoded and echoed, not replaced by a fresh one."""
     route = servicemaps.Route(
         method="POST",
         path="/v1/customers/{customer}",
@@ -446,8 +421,7 @@ def test_a_percent_encoded_id_is_still_the_id_the_request_names():
 
 
 def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
-    """Across every shipped write route: a route with a `{…}` segment carrying an id prefix must
-    echo it, and one without must mint, so no route answers with a fresh id for a named one."""
+    """Every shipped route echoes an id its path names and mints one when its path names none."""
     for sm in SHIPPED.services:
         for route in sm.routes:
             for name, spec in route.ids.items():
@@ -457,9 +431,8 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
                     sample = route.path.replace("{", "").replace("}", "")
                     assert generic.named_id(route, sample, prefix) is None, route.operation
                     continue
-                # Only the LAST hole carries the prefix; every other one gets a segment that
-                # does not. Filling them all would make `named_id` match the first hole whatever
-                # it held, and the test would pass on a route whose id is in the wrong segment.
+                # Only the last hole carries the prefix: filling them all would pass a route
+                # whose id is in the wrong segment.
                 parts = route.path.split("/")
                 last = max(i for i, part in enumerate(parts) if part.startswith("{"))
                 filled = "/".join(
@@ -486,14 +459,12 @@ def test_every_shipped_write_route_that_names_ids_round_trips_or_mints():
     ],
 )
 def test_every_json_content_type_is_parsed(ct):
-    """Only the exact `application/json` was read before, so a `+json` body was indistinguishable
-    from a malformed one and reflected nothing."""
+    """Every JSON media type, `+json` suffixes included, is parsed as JSON."""
     assert bodies.reflect(make_request(body=b'{"a": 1}', content_type=ct)) == {"a": 1}
 
 
 def test_a_slack_incoming_webhook_answers_the_literal_ok():
-    """A real incoming webhook answers the body `ok` as text/plain. The Web API envelope it got
-    instead breaks `assert resp.text == "ok"`, the common raw-requests idiom."""
+    """A Slack incoming webhook is answered with the text/plain body `ok`, as the real one is."""
     ans = answer_shipped(
         make_request(
             "POST",
@@ -510,8 +481,7 @@ def test_a_slack_incoming_webhook_answers_the_literal_ok():
 
 
 def test_the_web_api_still_gets_the_json_envelope():
-    """The literal body is keyed on `(service, operation)`, not on the host, so the rest of
-    `slack` is unaffected even though hooks.slack.com is part of the same service."""
+    """The webhook's literal body is keyed by operation, so the Web API keeps its JSON envelope."""
     ans = answer_shipped(
         make_request(
             "POST",
@@ -526,8 +496,7 @@ def test_the_web_api_still_gets_the_json_envelope():
 
 
 def test_a_body_a_strict_json_parser_would_refuse_reflects_nothing():
-    """`_has_non_finite` replaced a throwaway serialization of the whole body; it must still keep
-    NaN and Infinity out, because it is what makes the single json.dumps unable to fail."""
+    """A body with NaN or Infinity reflects nothing, so the one `json.dumps` cannot fail."""
     for raw in [b'{"v": NaN}', b'{"v": Infinity}', b'{"v": -Infinity}', b'{"v": [1e400]}']:
         assert bodies.reflect(make_request(body=raw, content_type="application/json")) == {}
     assert bodies.reflect(make_request(body=b'{"v": 1.5}', content_type="application/json")) == {
@@ -536,17 +505,14 @@ def test_a_body_a_strict_json_parser_would_refuse_reflects_nothing():
 
 
 def test_the_body_is_serialized_exactly_once(monkeypatch):
-    """Encoding it a second time, say inside reflect purely to validate it, would put that call
-    outside the never-raise guard."""
+    """A faked body is serialised once, inside the guard that keeps the answer path from raising."""
     calls = []
 
     def counting(*args, **kwargs):
         calls.append(1)
         return json.dumps(*args, **kwargs)
 
-    # Rebind the name `json` inside policy rather than mutating the shared stdlib module: the
-    # latter counts every json.dumps in the process, including ones classify or servicemaps make,
-    # which turns this into a tripwire for whatever another batch adds to that path.
+    # Rebind `json` in `services` only: patching the stdlib module would count every caller.
     monkeypatch.setattr(services, "json", SimpleNamespace(dumps=counting, loads=json.loads))
     answer_shipped(
         make_request(
@@ -560,31 +526,28 @@ def test_the_body_is_serialized_exactly_once(monkeypatch):
 
 
 def test_a_digit_keyed_metadata_field_stays_an_object():
-    """Form-body structure survives for digit keys too. `metadata[0]=zero` is the key "0", and
-    the live API answers `{"metadata": {"0": "zero"}}`. Promoted to a list,
-    `refund.metadata["0"]` raises TypeError instead of returning the value the caller sent."""
+    """`metadata[0]=zero` stays `{"0": "zero"}`, as the live API answers, not a list."""
     assert bodies.parse_form("metadata[0]=zero") == {"metadata": {"0": "zero"}}
     assert bodies.parse_form("metadata[0]=a&metadata[1]=b") == {"metadata": {"0": "a", "1": "b"}}
-    # Nested under another field, and mixed with a string key, it is the same field name.
+    # The same holds nested under another field, and mixed with a string key.
     assert bodies.parse_form("a[metadata][0]=z") == {"a": {"metadata": {"0": "z"}}}
     assert bodies.parse_form("metadata[0]=z&metadata[k]=v") == {"metadata": {"0": "z", "k": "v"}}
 
 
 def test_a_real_array_field_is_still_promoted_to_a_list():
-    """The exemption is by field name, so the rule `metadata` opts out of still applies to
-    everything else: `expand[0]=a&expand[1]=b` is an array on the wire and a list in the echo."""
+    """An array field other than `metadata` (`expand[0]=a&expand[1]=b`) still becomes a list."""
     assert bodies.parse_form("expand[0]=charge&expand[1]=customer") == {
         "expand": ["charge", "customer"]
     }
     assert bodies.parse_form("line_items[0][price]=p") == {"line_items": [{"price": "p"}]}
 
 
-# ------------------------------------------------------- the L1 fixture answer
+# ------------------------------------------------------- the fixture answer
 
 
 @pytest.fixture
 def no_fixtures(tmp_path, monkeypatch):
-    """Point the fixtures at an empty directory, so every `fixture:` route degrades to L0."""
+    """Point the fixtures at an empty directory, so every `fixture:` route answers with the echo."""
     empty = tmp_path / "fixtures"
     empty.mkdir()
     monkeypatch.setattr(generic, "fixtures_dir", lambda: empty)
@@ -607,8 +570,7 @@ def test_a_mapped_write_is_answered_at_l1_and_says_so():
 
 
 def test_the_faked_refund_is_a_whole_refund_object_not_just_what_was_posted():
-    """The point of L1. An agent branches on `status`, `currency` and `destination_details`,
-    and at L0 none of them are there at all - it reads `None` and takes the wrong branch."""
+    """A fixture answer is a whole refund object, with the fields an agent branches on."""
     body = json.loads(_faked_refund().response.body)
     fixture = generic.fixture_object("stripe", "refund")
     assert fixture is not None
@@ -622,23 +584,19 @@ def test_the_posted_fields_still_win_over_the_fixtures_own_values():
     body = json.loads(_faked_refund(b"charge=ch_REAL&amount=1234&reason=fraudulent").response.body)
     assert body["charge"] == "ch_REAL"
     assert body["amount"] == 1234  # an int, as stripe-python's own Refund.amount is
-    # `reason` is null in the fixture, so it names no type and whatever was sent is taken.
+    # `reason` is null in the fixture, so it names no type and the posted value is taken.
     assert body["reason"] == "fraudulent"
 
 
 def test_a_field_the_fixture_does_not_name_is_not_invented():
-    """The live API refuses an unknown parameter outright. Echoing it back instead would hand
-    the agent a refund object no real response can produce, which is the drift a fixture exists
-    to stop; the L0 echo keeps reflecting everything, and that is what makes it the honest floor.
-    """
+    """A fixture answer drops a posted field the object does not have, as no real one carries it."""
     body = json.loads(_faked_refund(b"charge=ch_1&not_a_refund_field=surprise").response.body)
     assert "not_a_refund_field" not in body
     assert body["charge"] == "ch_1"
 
 
 def test_a_value_of_the_wrong_type_leaves_the_fixtures_own_in_place():
-    """`amount` is a number in every real refund. A form body can say anything, and a string
-    there is what makes `refund.amount / 100` raise inside the agent instead of here."""
+    """A posted value of the wrong type leaves the fixture's own value in place."""
     body = json.loads(_faked_refund(b"amount=not-a-number").response.body)
     fixture = generic.fixture_object("stripe", "refund")
     assert fixture is not None
@@ -646,8 +604,7 @@ def test_a_value_of_the_wrong_type_leaves_the_fixtures_own_in_place():
 
 
 def test_the_service_owns_the_fields_that_say_what_this_object_is():
-    """`object` decides which class stripe-python builds, and `id` is what the agent logs. A
-    body posting either must not choose them, or a refund route answers a `charge`."""
+    """A posted `object`, `id`, `created` or `livemode` never overrides the service's own."""
     body = json.loads(
         _faked_refund(b"object=charge&id=re_MINE&created=1&livemode=true").response.body
     )
@@ -658,9 +615,7 @@ def test_the_service_owns_the_fields_that_say_what_this_object_is():
 
 
 def test_livemode_is_set_where_the_object_has_it():
-    """irimi performed nothing, so nothing it answers happened in live mode. Only where the
-    real object carries the field: inventing one on a refund would be a field Stripe never sends.
-    """
+    """`livemode: false` is set only on objects whose real shape carries the field."""
     body = json.loads(
         answer_shipped(make_request("POST", path="/v1/customers/cus_REAL123")).response.body
     )
@@ -669,9 +624,7 @@ def test_livemode_is_set_where_the_object_has_it():
 
 
 def test_l1_still_echoes_the_id_the_path_names_and_mints_the_rest():
-    """Echoing a named id and never echoing a client secret are properties of the answer, not
-    of the echo, so they hold here too: an update answers with the id it was given, a create
-    mints one."""
+    """A fixture answer echoes the id its path names and mints the rest, as the echo does."""
     update = json.loads(
         answer_shipped(make_request("POST", path="/v1/customers/cus_REAL123")).response.body
     )
@@ -692,9 +645,7 @@ def test_l1_still_echoes_the_id_the_path_names_and_mints_the_rest():
 
 
 def test_a_client_secret_is_still_never_echoed_back_as_the_id_at_l1():
-    """A client secret in the path never becomes the answer's `id`, on the route that has one.
-    The fixture carries a `client_secret` of its own, and the one thing that must not happen is
-    the path's copy of it becoming `id`."""
+    """A client secret in the path never becomes a fixture answer's `id`."""
     body = json.loads(
         answer_shipped(
             make_request("POST", path="/v1/payment_intents/pi_ABC_secret_XYZ/cancel")
@@ -705,8 +656,7 @@ def test_a_client_secret_is_still_never_echoed_back_as_the_id_at_l1():
 
 
 def test_metadata_keeps_its_string_keys_and_string_values_at_l1():
-    """Form-body structure, pinned against L1: `metadata` is a dict in the fixture, so the
-    parsed form value replaces it wholesale and every rule `parse_form` applies survives."""
+    """A fixture answer's `metadata` is the parsed form value, string keys and values intact."""
     body = json.loads(_faked_refund(b"metadata[order_id]=6735&metadata[0]=zero").response.body)
     assert body["metadata"] == {"order_id": "6735", "0": "zero"}
 
@@ -718,8 +668,7 @@ def test_a_hostile_body_cannot_reach_the_fixtures_own_fields():
 
 
 def test_two_writes_do_not_share_one_fixture():
-    """The faker writes over the object it is given, so a cached object handed out twice would
-    make every later refund carry the first caller's arguments."""
+    """Two faked writes never share a fixture object, so one caller's fields never leak."""
     first = json.loads(_faked_refund(b"charge=ch_FIRST&amount=111").response.body)
     second = json.loads(_faked_refund(b"charge=ch_SECOND").response.body)
     assert first["charge"] == "ch_FIRST"
@@ -730,28 +679,25 @@ def test_two_writes_do_not_share_one_fixture():
 
 
 def test_a_route_whose_fixture_cannot_be_read_falls_back_to_l0_and_says_so(no_fixtures):
-    """A damaged or trimmed install must still answer the write - L0 is the floor - but the
-    trace has to say the fidelity is not the one the map promised, or the run reads as a
-    working L1."""
+    """An unreadable fixture falls back to the echo, flagged `fixture-failed`."""
     ans = _faked_refund()
     assert ans.answered_by == "fake-L0"
     assert ans.flags == (Flag.FIXTURE_FAILED,)
     body = json.loads(ans.response.body)
-    assert body["charge"] == "ch_test"  # the L0 echo, which still parses
+    assert body["charge"] == "ch_test"  # the echo, which still parses
     assert body["id"].startswith("re_")
     assert "status" not in body
 
 
 def test_an_unmapped_write_is_still_l0_with_no_flag():
-    """L1 is per route. A host no map claims has no fixture to start from and must not pretend."""
+    """A write to an unmapped host is an echo with no flag: it has no fixture to fail."""
     ans = answer_shipped(make_request("POST", host="example.invalid", path="/things", body=b"{}"))
     assert ans.answered_by == "fake-L0"
     assert ans.flags == ()
 
 
 def test_every_shipped_fixture_route_names_an_object_that_ships():
-    """A `fixture:` naming an object the package does not have degrades to L0 silently but for
-    the flag, which is the `--base-url-host` class of bug: configured, never consulted."""
+    """Every shipped `fixture:` names an object that ships."""
     for sm in SHIPPED.services:
         for route in sm.routes:
             if route.fixture:
@@ -771,25 +717,20 @@ def test_every_shipped_fixture_route_names_an_object_that_ships():
 def test_stripe_python_parses_every_faked_object_with_every_field(
     path, body, cls_name, fixture_field
 ):
-    """stripe-python parses every fixture-faked object, every field included. `stripe` is not a
-    dependency of this project, so this is skipped in the plain dev venv; `uv sync --group
-    examples` installs it."""
+    """stripe-python parses every fixture-faked object, every field included."""
     stripe = pytest.importorskip("stripe")
     ans = answer_shipped(make_request("POST", path=path, body=body, content_type=FORM_CONTENT_TYPE))
     assert ans.answered_by == "fake-L1"
     parsed = json.loads(ans.response.body)
     obj = getattr(stripe, cls_name).construct_from(parsed, STRIPE_TEST_X)
     assert obj.object == parsed["object"]
-    # Every field survives the SDK's own round trip, which is what "with every fixture field
-    # present" means. Through `str(obj)` - the SDK's JSON serialization - because it turns each
-    # nested object into a StripeObject of its own, so a plain `==` against the dict fails.
+    # Compared through `str(obj)`, the SDK's JSON: its nested StripeObjects defeat a plain `==`.
     assert json.loads(str(obj)) == parsed
-    # And the one field the caller never sent is readable as an attribute, not an AttributeError,
-    # which is the whole difference from L0.
+    # A field the caller never sent reads as an attribute, which an echo could not give.
     assert getattr(obj, fixture_field) == parsed[fixture_field]
 
 
-# ------------------------------------------------------- the L1 Slack envelope
+# ------------------------------------------------------- the Slack envelope
 
 
 def _post_message(body: bytes = b'{"channel": "C1", "text": "hi"}'):
@@ -805,9 +746,7 @@ def _post_message(body: bytes = b'{"channel": "C1", "text": "hi"}'):
 
 
 def test_a_faked_slack_post_nests_the_fixture_message_inside_the_envelope():
-    """slack_sdk reads `ok` to decide the call succeeded and `ts` to address the message it just
-    posted; both are the envelope's. The fixture is what sits under `message:` - the fields a real
-    response carries and the request never sent."""
+    """A faked Slack post nests the fixture message under `message:` inside the envelope."""
     ans = _post_message()
     body = json.loads(ans.response.body)
     assert ans.answered_by == "fake-L1"
@@ -821,8 +760,7 @@ def test_a_faked_slack_post_nests_the_fixture_message_inside_the_envelope():
 
 
 def test_the_faked_messages_ts_is_the_envelopes_and_not_the_fixtures():
-    """`ts` is the message's identity for the rest of the run, so it is minted per answer. Taking
-    the fixture's frozen one would make every faked message the same message."""
+    """A faked message's `ts` is the envelope's minted one, never the fixture's."""
     body = json.loads(_post_message().response.body)
     assert body["message"]["ts"] == body["ts"]
     fixture = generic.fixture_object("slack", "message")
@@ -831,8 +769,7 @@ def test_the_faked_messages_ts_is_the_envelopes_and_not_the_fixtures():
 
 
 def test_a_slack_post_still_answers_the_envelope_when_the_fixture_cannot_be_read(no_fixtures):
-    """A fixture this install cannot read must not cost the agent the `ok` it reads to decide the
-    call worked: it degrades to the envelope alone, flagged, the way Stripe degrades to L0."""
+    """An unreadable Slack fixture leaves the envelope alone, still `ok`, and flagged."""
     ans = _post_message()
     body = json.loads(ans.response.body)
     assert ans.answered_by == "fake-L0"
@@ -865,16 +802,13 @@ def test_slack_sdk_parses_the_faked_post():
 
 
 def _ts(value: str) -> tuple[int, int]:
-    """A `ts` as the pair it sorts by. Not a float: consecutive `ts` values are two ULPs apart at
-    Slack's magnitude, so comparing floats tests something narrower than the promise, which is
-    over the two integers."""
+    """A `ts` as the integer pair it sorts by; floats are too coarse at Slack's magnitude."""
     whole, _, fraction = value.partition(".")
     return int(whole), int(fraction)
 
 
 def test_a_minted_ts_sorts_after_a_real_one_the_run_has_seen():
-    """A minted `ts` sorts after every real one the run has read. A history read going past first
-    is what puts the faked message after the real ones instead of somewhere in the middle."""
+    """A minted `ts` sorts after every real one the run has read, so faked messages come last."""
     clock = services.TsClock()
     newest = "1999999999.000500"
     clock.observe_history(
@@ -884,8 +818,7 @@ def test_a_minted_ts_sorts_after_a_real_one_the_run_has_seen():
 
 
 def test_an_older_real_ts_does_not_move_the_watermark_backwards():
-    """Reading an old channel must not rewind the sequence: two messages with one `ts` are two
-    messages that are the same message, which is the whole reason `ts` is minted the way it is."""
+    """Reading an old channel never rewinds the `ts` sequence, so no `ts` repeats."""
     clock = services.TsClock()
     clock.last = (1_999_999_999, 500)
     clock.observe_history(json.dumps({"messages": [{"ts": "1000000000.000000"}]}).encode())
@@ -893,8 +826,7 @@ def test_an_older_real_ts_does_not_move_the_watermark_backwards():
 
 
 def test_a_nested_ts_is_observed_wherever_it_sits():
-    """`conversations.info` carries the channel's newest message under `latest`, not in a list of
-    messages. The walk does not care which shape the body is."""
+    """A `ts` is observed wherever it sits, such as `conversations.info`'s `latest`."""
     clock = services.TsClock()
     clock.observe_history(json.dumps({"channel": {"latest": {"ts": "1999999999.000001"}}}).encode())
     assert _ts(clock.mint()) > (1_999_999_999, 1)
@@ -913,8 +845,7 @@ def test_a_nested_ts_is_observed_wherever_it_sits():
     ],
 )
 def test_observing_a_body_that_carries_no_timestamp_changes_nothing(body):
-    """The clock runs inside a mitmproxy hook, where a raise forwards the flow and a forwarded write
-    escapes shadow mode. Every shape a real service - or a hostile one - can send is a no-op."""
+    """A body without a usable `ts` changes nothing and never raises (fail-closed hook rule)."""
     clock = services.TsClock()
     clock.last = (1_700_000_000, 7)
     clock.observe_history(body)
@@ -922,8 +853,7 @@ def test_observing_a_body_that_carries_no_timestamp_changes_nothing(body):
 
 
 def test_only_a_service_with_an_observer_learns_from_a_read():
-    """The engine hands `observe_read` every read it forwards and names no service of its own.
-    Which services learn anything from a body is this module's table to hold."""
+    """Only a service whose spec has a read observer learns from a forwarded read."""
     clock = services.TsClock()
     body = json.dumps({"messages": [{"ts": "1999999999.000500"}]}).encode()
     services.observe_read("stripe", body, clock)
@@ -933,8 +863,7 @@ def test_only_a_service_with_an_observer_learns_from_a_read():
 
 
 def test_two_policies_never_share_a_ts_sequence():
-    """The clock is the policy's, one per engine: what one engine saw or minted does not move
-    another's sequence."""
+    """Each policy owns its `ts` clock, so one engine's reads never move another's sequence."""
     seen, fresh = ShadowPolicy(), ShadowPolicy()
     seen.observe_read("slack", json.dumps({"messages": [{"ts": "1999999999.000500"}]}).encode())
     assert seen.slack_ts.last == (1_999_999_999, 500)
@@ -990,8 +919,7 @@ def test_a_rejection_mints_no_slack_ts():
 
 
 def test_a_slack_write_no_envelope_names_gets_the_default_envelope():
-    """`ok: true` with the posted channel and a minted `ts`, never the generic echo: slack_sdk
-    raises on a body without `ok`."""
+    """A Slack write with no envelope of its own gets `ok`, its channel and a minted `ts`."""
     route = servicemaps.Route("POST", "/api/chat.update", "chat.update", "write")
     slack = servicemaps.ServiceMap(service="slack", hosts=frozenset({"slack.com"}), routes=(route,))
     request = make_request(

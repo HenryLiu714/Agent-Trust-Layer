@@ -79,8 +79,7 @@ def test_attribute_run_blank_header_uses_default():
 
 @pytest.mark.parametrize("value", ["../x", "", "a" * 65, "a b"])
 def test_attribute_run_treats_an_invalid_run_id_as_absent(value):
-    """A run id becomes a directory name in the trace store, so one `trace.is_valid_run_id`
-    refuses never names a run."""
+    """A run id `trace.is_valid_run_id` refuses never names a run: it becomes a directory name."""
     assert attribute_run(builders.request(headers=(("irimi-run", value),)), "dflt") == "dflt"
 
 

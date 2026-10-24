@@ -1,5 +1,4 @@
-"""`decide.targets`: which requests a user's target answers instead of the service, the URL each
-is sent to, and the credential headers a target never sees."""
+"""`decide.targets`: which requests a target answers, the URL it gets, and what it never sees."""
 
 from dataclasses import replace
 from urllib.parse import urlsplit
@@ -29,7 +28,7 @@ def test_a_route_target_makes_the_answer_delegated_not_faked():
 
 
 def test_self_is_the_default_target_and_is_exactly_the_old_behaviour():
-    """`target: self` is the local fake, named rather than assumed."""
+    """With no target set, irimi fakes the write itself."""
     ans = answer_shipped(make_request("POST", path="/v1/refunds"))
     assert ans.answered_by == "fake-L1"
     assert ans.forward_to is None
@@ -54,7 +53,7 @@ def test_target_reads_delegates_the_services_reads_too():
 
 
 def test_an_unlisted_route_on_a_targeted_service_is_delegated_too():
-    """Half the stub's world and half ours would be worse than either."""
+    """A service target answers its unlisted routes too, so one service is never split."""
     index = shipped_with_targets([("api.stripe.com", "", "http://127.0.0.1:3000")])
     ans = answer_with(index, make_request("POST", path="/v1/tax/calculations"))
     assert ans.answered_by == "delegated"
@@ -62,8 +61,7 @@ def test_an_unlisted_route_on_a_targeted_service_is_delegated_too():
 
 
 def test_llm_and_telemetry_are_never_delegated():
-    """`target_for` refuses them on a matched route; `delegate` has to say the same thing for an
-    unlisted one, or a service target would quietly start forwarding inference."""
+    """A service target never answers an llm request, so inference stays live."""
     index = shipped_with_targets(
         [("api.openai.com", "", "http://127.0.0.1:3000")], target_reads=["api.openai.com"]
     )
@@ -95,9 +93,9 @@ def test_forward_auth_reaches_the_engine_through_the_answer():
 
 
 def test_an_unlisted_read_on_a_targeted_service_is_not_delegated_without_target_reads():
-    """The unmatched branch of `delegate`, which `target_for` never sees. Replacing its whole
-    condition with `elif True:` passed all 421 tests: the two tests whose docstrings claim to
-    cover it both use *listed* routes, so they exercise `target_for` and stop above the `elif`."""
+    """An unlisted read on a targeted service stays live without `target_reads`.
+
+    This is `delegate`'s unmatched branch, which the listed-route tests never reach."""
     index = shipped_with_targets([("api.stripe.com", "", "http://127.0.0.1:3000")])
     ans = answer_with(index, make_request("GET", path="/v1/tax/calculations"))  # GET, and unlisted
     assert ans.answered_by == "live"
@@ -105,12 +103,10 @@ def test_an_unlisted_read_on_a_targeted_service_is_not_delegated_without_target_
 
 
 def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
-    """The other half of the same branch. A service target must not quietly start forwarding
-    inference or someone else's events just because the map does not list the route.
+    """An unlisted llm or telemetry request never goes to a service target.
 
-    The classification is built here rather than loaded, because the only way a map could give an
-    *unmatched* route a live kind is a live `default_kind`, which the loader refuses.
-    """
+    The classification is built by hand: the loader refuses the live `default_kind` that could give
+    an unlisted route a live kind."""
     sm = servicemaps.loader.load_shipped()[0]
     sm = replace(sm, target=Target.parse("http://127.0.0.1:3000"), target_reads=True)
     for kind in ("llm", "telemetry", "read"):
@@ -130,10 +126,9 @@ def test_an_unmatched_llm_or_telemetry_request_is_never_delegated():
 
 
 def test_a_credential_path_host_is_never_delegated_off_the_machine():
-    """THE SCOPE RULE, decision half. The loader already refuses this configuration whichever
-    layer it arrived through; this asks the same question of the request and the answer actually
-    in front of `delegate`, so a target reaching it some other way is refused rather than
-    escaping. The map is built here because the loader will not produce one."""
+    """A credential-path host is never sent to an off-machine target (the scope rule, at decision).
+
+    The loader refuses this map, so it is built by hand to test `delegate` itself."""
     slack = next(sm for sm in servicemaps.loader.load_shipped() if sm.service == "slack")
     assert "hooks.slack.com" in slack.hosts
     off_machine = replace(slack, target=Target.parse("http://stub.internal:9000"))
@@ -149,14 +144,14 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
     forward = targets.delegate(request, classify(request, index))
     assert forward is not None and forward.url.startswith("http://stub.internal:9000")
 
-    # And a loopback target on the credential host is fine - that is the supported way to stub it.
+    # A loopback target on the credential host is the supported way to stub it.
     local = servicemaps.MapIndex((replace(slack, target=Target.parse("http://127.0.0.1:3000")),))
     request = make_request("POST", host="hooks.slack.com", path="/workflows/T0/A0/SECRET/xyz")
     forward = targets.delegate(request, classify(request, local))
     assert forward is not None and forward.url.startswith("http://127.0.0.1:3000")
 
 
-# ------------------------------------------------------------------ answer targets
+# ------------------------------------------------------------------ target URLs
 
 
 @pytest.mark.parametrize(
@@ -164,10 +159,9 @@ def test_a_credential_path_host_is_never_delegated_off_the_machine():
     [
         # A bare origin keeps the request's own path.
         ("http://127.0.0.1:3000", "/v1/refunds", "", True, "http://127.0.0.1:3000/v1/refunds"),
-        # A target carrying a path replaces the part the route matched - which, because a route
-        # pattern always matches the whole path, is all of it.
+        # A target carrying a path replaces the matched part, which is the whole path.
         ("http://127.0.0.1:3000/refund", "/v1/refunds", "", True, "http://127.0.0.1:3000/refund"),
-        # Nothing matched, so there is no matched prefix to replace and the path is appended.
+        # Nothing matched, so the path is appended.
         (
             "http://127.0.0.1:3000/stub",
             "/v1/tax/calculations",
@@ -192,8 +186,9 @@ def test_target_url_follows_proxy_pass_path_semantics(target, path, query, match
 
 
 def test_a_target_on_our_own_listener_is_refused():
-    """Targets are loopback-only, so the host cannot tell a stub from us - the port can. Dialling
-    our own listener is the self-connection loop the reverse door also refuses."""
+    """A target on irimi's own port is refused, in every loopback spelling.
+
+    Targets are loopback-only, so only the port tells a stub from irimi's own listener."""
     with pytest.raises(TargetRefused) as exc:
         refuse_self_target(Target.parse("http://127.0.0.1:4000"), 4000)
     assert "own listener" in str(exc.value)
@@ -209,10 +204,9 @@ def test_a_target_on_another_port_is_allowed():
 
 
 def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch):
-    """Bound wider than loopback, irimi is also the address a connection reached it at, and a
-    name resolving to it, as `detect_door` says of a request. A target there, which only
-    `--allow-remote-target` lets off loopback, is irimi's own listener too: refused as one, never
-    dialled to be refused again by the reverse door."""
+    """A target at the address irimi was reached at, or a name for it, is irimi's own listener.
+
+    Bound wider than loopback, that address is irimi too; only `--allow-remote-target` allows it."""
     import socket
 
     real = socket.getaddrinfo
@@ -232,10 +226,9 @@ def test_a_target_naming_the_address_irimi_was_reached_at_is_refused(monkeypatch
 
 
 def test_a_hash_in_the_request_path_survives_the_target_url():
-    """The policy->engine seam is a URL *string*, so the engine splits it again to rewrite the
-    flow. A literal `#` in a request target is legal and means nothing there, but `urlsplit`
-    reads it as a fragment: unescaped, `POST /unlisted#x?a=1` would reach the target as
-    `/unlisted` with no query at all, and `Exchange.target` would record a URL never sent."""
+    """A `#` in the request path or query is escaped in the target URL, not read as a fragment.
+
+    The engine splits the URL again; unescaped, `/unlisted#x?a=1` would lose its query."""
     req = replace(builders.request(method="POST"), path="/unlisted#x", query="a=1")
     url = target_url(Target.parse("http://127.0.0.1:3000"), req, matched=False).url
     parts = urlsplit(url)
@@ -248,7 +241,7 @@ def test_a_hash_in_the_request_path_survives_the_target_url():
     assert urlsplit(sent_to.url).query == "a=1%23b"
 
 
-# ------------------------------------- credential headers an answer target must not see
+# ------------------------------------------- credential headers a target must not see
 
 
 @pytest.mark.parametrize(
@@ -275,6 +268,5 @@ def test_a_credential_header_is_recognised_whoever_spells_it(name):
     "name", ["content-type", "content-length", "host", "user-agent", "accept", "idempotency-key"]
 )
 def test_an_ordinary_header_is_not_a_credential(name):
-    """The rule is wide on purpose, but not so wide that a target gets a request it cannot
-    answer: everything an SDK needs to be understood has to survive."""
+    """An ordinary header an SDK needs survives the wide credential rule."""
     assert not is_credential_header(name)

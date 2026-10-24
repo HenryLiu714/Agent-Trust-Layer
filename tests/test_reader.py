@@ -11,8 +11,9 @@ from tests.support.upstreams import Logged, refusing_port, serve
 
 
 class _Upstream(Logged):
-    """Answers every GET with `status`, `answer` and, when set, a `location`, all of which a test
-    sets on its own server as `upstream.handler.status`. Logs each path."""
+    """Answers every GET with `status`, `answer` and an optional `location`, and logs each path.
+
+    A test sets these on its own server, as `upstream.handler.status`."""
 
     status = 200
     answer = b'{"object": "charge"}'
@@ -62,9 +63,9 @@ def test_an_unreachable_upstream_is_none_and_not_a_raise():
 def test_the_upstream_reader_dials_the_upstream_whatever_proxy_the_shell_exported(
     upstream, monkeypatch
 ):
-    """No proxy: `urlopen`'s default opener would send the engine's own read to the
-    `HTTP_PROXY`/`HTTPS_PROXY` a shell exported, which mitmproxy's forwarding never reads, so a
-    dead proxy would make every L3 check `not_evaluable`. The read reaches the upstream it names."""
+    """irimi's check read ignores an exported `HTTP_PROXY`/`HTTPS_PROXY` and dials the upstream.
+
+    mitmproxy's own forwarding ignores them too, so a dead shell proxy must not break the check."""
     dead = f"http://127.0.0.1:{refusing_port()}"
     for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"):
         monkeypatch.setenv(name, dead)
@@ -78,9 +79,7 @@ def test_the_upstream_reader_dials_the_upstream_whatever_proxy_the_shell_exporte
 
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
 def test_the_upstream_reader_returns_a_redirect_and_never_follows_it(upstream, status, monkeypatch):
-    """No redirect: the read dials the host the classifier saw and no other,
-    so every 3xx urllib would follow for a GET comes back as the answer it is, body and all, and
-    wherever it pointed is never asked."""
+    """A 3xx comes back as the answer, body and all; the host it points at is never asked."""
     upstream.handler.status = status
     upstream.handler.location = f"http://127.0.0.1:{upstream}/elsewhere"
     response = UpstreamReader()(_local(upstream))

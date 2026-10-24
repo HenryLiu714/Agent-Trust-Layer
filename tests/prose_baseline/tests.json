@@ -16,11 +16,5 @@
   },
   "tests/e2e/workflows/test_w10_flaky_upstream.py": {
     "issue_ref": 3
-  },
-  "tests/test_targets.py": {
-    "caps_run": 1
-  },
-  "tests/test_trace.py": {
-    "caps_run": 1
   }
 }

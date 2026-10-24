@@ -1,5 +1,4 @@
-"""`engine.ingress`: telling a base-URL request from a proxied one, and rewriting it to the
-service it names."""
+"""`engine.ingress`: telling a base-URL request from a proxied one, and rewriting it."""
 
 from dataclasses import replace
 
@@ -16,7 +15,7 @@ ALLOWED = frozenset({"api.stripe.com", "127.0.0.1"})
 def _door_req(
     path: str, host: str = "localhost", port: int = 4000, query: str = "", method: str = "GET"
 ) -> Request:
-    """What the reverse door sees: plain http, addressed to the listener, host header set."""
+    """A base-URL request: plain http, addressed to the listener, host header set."""
     return Request(
         method=method,
         scheme="http",
@@ -65,10 +64,10 @@ def test_an_unknown_name_on_our_own_port_resolving_here_is_base_url_mode(monkeyp
 
 
 def test_the_address_a_connection_arrived_on_is_this_machine(monkeypatch):
-    """Bound wider than loopback, the listener is also the address it was reached at. That
-    address on irimi's port, in either spelling a dual-stack socket reports, is the reverse door;
-    so is a name that resolves to it, as `irimi` does from another container. Another address,
-    another port, or no local address at all is still the forward door."""
+    """The address a connection arrived on, or a name resolving to it, is base-URL mode.
+
+    Either spelling a dual-stack socket reports counts. Another address, another port, or no local
+    address means the request came through the proxy."""
     import socket
 
     from irimi.core import netaddr
@@ -184,8 +183,7 @@ def test_a_base_url_rewrite_with_no_hosts_refuses_everything():
 
 
 def test_a_telemetry_wildcard_is_not_a_base_url_host(tmp_path, monkeypatch):
-    """Decision: a wildcard classifies through the forward door only. `--base-url-host` is the way
-    in through the reverse door, and `rewrite_reverse` refuses the host until someone passes it."""
+    """A wildcard host classifies only through the proxy; base-URL mode needs `--base-url-host`."""
     index = index_from(tmp_path, monkeypatch)
     assert "*.ingest.sentry.io" not in index.hosts
     assert "o0.ingest.sentry.io" not in index.hosts

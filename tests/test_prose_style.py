@@ -1,9 +1,6 @@
 """Hold comments, docstrings and shipped map lines to CONTRIBUTING's style guide, as a ratchet.
 
-Each tree has a baseline in `tests/prose_baseline/<tree>.json` mapping a repo-relative path to
-its count per pattern. A file may not exceed its counts, a file absent from the baseline may not
-match at all, and a baseline count above the tree's real count fails too, so every cleanup lowers
-the baseline in the same change. A moved or renamed file takes its entry with it.
+Per-file counts in `tests/prose_baseline/<tree>.json` may only fall; a moved file keeps its entry.
 """
 
 import ast

@@ -100,9 +100,7 @@ def test_canonical_params_keep_everything_else():
 
 
 def test_canonical_tells_two_objects_on_one_route_apart():
-    """`payment_intents.cancel` is one route over every `pi_`, and it posts nothing at all, so
-    the path is the whole of what says which object the caller named. Without it a key reused to
-    cancel a second intent compared equal to the first and replayed its answer."""
+    """Cancels of two intents differ by path, since `payment_intents.cancel` posts nothing."""
     assert STRIPE is not None
     cancel = servicemaps.model.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
     assert cancel is not None
@@ -113,8 +111,7 @@ def test_canonical_tells_two_objects_on_one_route_apart():
 
 
 def test_canonical_tells_two_routes_with_the_same_empty_body_apart():
-    """A key reused on another endpoint is another write. Both of these post nothing, so only
-    the path separates a cancelled intent from an updated customer."""
+    """Two routes that both post nothing differ by path, so a reused key is another write."""
     assert STRIPE is not None
     cancel = servicemaps.model.match_route(STRIPE, "POST", "/v1/payment_intents/pi_AAA/cancel")
     update = servicemaps.model.match_route(STRIPE, "POST", "/v1/customers/cus_ZZZ")
@@ -125,8 +122,7 @@ def test_canonical_tells_two_routes_with_the_same_empty_body_apart():
 
 
 def test_canonical_tells_two_sendings_apart_by_their_query():
-    """A parameter a caller put in the query is still a parameter. `bodies.reflect` reads the body
-    only, so the query rides in the identity beside the path."""
+    """A query parameter is part of a sending's identity, beside the path and the body."""
     route = Route(method="POST", path="/v1/refunds", operation="refunds.create", kind="write")
     plain = idempotency.canonical(_request(), route)
     with_query = idempotency.canonical(_request(query="amount=250"), route)
@@ -255,8 +251,7 @@ def test_a_replay_carries_the_replay_flag_and_the_original_fidelity_flag():
 
 
 def test_a_replay_issues_no_precondition_read():
-    """The write was checked once, when it was made. A second read would be a real request made
-    on the agent's behalf for a write the agent only made once."""
+    """A retry makes no second precondition read: the write was checked once, when it was made."""
     reader = canned_reader(json_response(200, charge_document()))
     policy = ShadowPolicy(reader=reader, maps=SHIPPED)
     first = ask(policy, refund_request())
@@ -265,8 +260,7 @@ def test_a_replay_issues_no_precondition_read():
     assert len(first.issued) == 1
     assert second.issued == ()
     assert second.precondition == first.precondition == "passed"
-    # The stored answer's currency comes back too, so the replayed exchange and the first one agree
-    # about what that single write was denominated in.
+    # The retry keeps the first answer's currency, so both exchanges agree on the one write.
     assert second.currency == first.currency == "usd"
 
 
@@ -282,15 +276,16 @@ def test_the_same_key_with_a_different_amount_is_an_idempotency_error():
     assert Flag.IDEMPOTENCY_CONFLICT in ans.flags
     assert Flag.IDEMPOTENT_REPLAY not in ans.flags
     assert ans.rejection_code == "idempotency_error"
-    # L3 was never asked, so it decided nothing: a conflict is not `precondition: rejected`.
+    # No precondition check ran, so a conflict is not `precondition: rejected`.
     assert ans.precondition is None
     assert ans.issued == ()
     assert len(reader.asked) == 1
 
 
 def test_a_replayed_rejection_is_the_same_rejection():
-    """Stripe keeps the first response under a key whether it was accepted or refused, so a
-    retry of a refused write is refused again - with the same body, and without asking again."""
+    """A retry of a refused write is refused again with the same body, without a second check read.
+
+    Stripe keeps the first response under a key whether it was accepted or refused."""
     reader = canned_reader(json_response(200, charge_document(refunded_so_far=4900)))
     policy = ShadowPolicy(reader=reader, maps=SHIPPED)
     first = ask(policy, refund_request())
@@ -316,8 +311,7 @@ def test_a_write_that_sent_no_key_is_never_replayed():
 
 
 def test_a_slack_write_is_never_replayed():
-    """Slack has no idempotency mechanism, so its spec has no `idempotency`: a
-    `chat.postMessage` sent twice really is two messages, whatever headers it carries."""
+    """A Slack write sent twice is two messages, whatever headers it carries: Slack has no keys."""
     policy = ShadowPolicy()
     post = slack_post_request("C0123")
     request = replace(post, headers=(*post.headers, ("idempotency-key", "idem-1")))
@@ -359,8 +353,7 @@ class _BrokenStore:
 
 @pytest.mark.parametrize("broken", ["get", "put"])
 def test_a_store_that_raises_answers_the_write_afresh(broken):
-    """Nothing on the answer path may raise: a raised hook forwards the flow, and a forwarded
-    write escapes shadow mode. A broken store costs the retry its replay and nothing else."""
+    """A store that raises costs a retry its stored answer, nothing else (fail-closed hook rule)."""
     policy = ShadowPolicy()
     policy.idempotency = _BrokenStore(broken)  # type: ignore[assignment]
     first = ask(policy, refund_request())
@@ -372,9 +365,7 @@ def test_a_store_that_raises_answers_the_write_afresh(broken):
 
 
 def test_a_key_reused_on_another_object_of_one_route_is_refused():
-    """A key names one write, not one route. `payment_intents.cancel` posts nothing at all, so
-    without comparing the path a key reused to cancel a second intent would replay the first
-    intent's answer and tell the agent it had cancelled an object it never named."""
+    """A key reused to cancel a second intent is refused, not answered with the first intent."""
     policy = ShadowPolicy()
     first = ask(policy, _cancel_request("pi_AAA"))
     second = ask(policy, _cancel_request("pi_BBB"))
@@ -386,8 +377,7 @@ def test_a_key_reused_on_another_object_of_one_route_is_refused():
 
 
 def test_a_key_reused_on_another_route_is_refused():
-    """The same hole across two routes: a cancel and a customer update both post an empty body,
-    so without the path the agent asking to update a customer would get a payment intent back."""
+    """A key reused across two routes with empty bodies is refused as a conflict."""
     policy = ShadowPolicy()
     ask(policy, _cancel_request("pi_AAA"))
     ans = ask(
@@ -399,10 +389,9 @@ def test_a_key_reused_on_another_route_is_refused():
 
 
 def test_stripe_python_raises_idempotency_error_on_the_conflict_body():
-    """The conflict body is what makes stripe-python raise `IdempotencyError`, the class an
-    agent's `except` clause names. Stripe's body carries no `code` for it - the SDK branches on
-    `type` - so the class is what is asserted and not `code`. Skipped without `stripe`, like
-    `test_stripe_python_raises_invalid_request_error_off_the_modeled_refusal`."""
+    """stripe-python raises `IdempotencyError` on irimi's conflict body.
+
+    The SDK branches on `type`, not `code`, so the class is asserted. Skipped without `stripe`."""
     pytest.importorskip("stripe")
     import stripe
     from stripe._api_requestor import _APIRequestor

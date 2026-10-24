@@ -37,8 +37,7 @@ def test_child_env_preserves_base_and_does_not_mutate():
 
 
 def test_an_engine_that_never_binds_is_an_engine_start_error_with_a_message():
-    """A ready timeout carries no message of its own; `start_engine` gives it one, so every
-    command prints the same line for it."""
+    """`start_engine` gives a ready timeout a message, so every command prints the same line."""
     from irimi.cli.runner import start_engine
     from irimi.engine import EngineStartError
 

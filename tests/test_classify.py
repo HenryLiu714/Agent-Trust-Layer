@@ -92,8 +92,7 @@ def test_a_route_pattern_matches_any_one_segment(tmp_path, monkeypatch):
 
 
 def test_classify_reads_a_post_only_services_reads_as_reads(tmp_path, monkeypatch):
-    """The whole point of the maps: Slack sends every call as POST, so the verb rule alone would
-    call this a write and fake it."""
+    """A Slack read sent as POST classifies as a read; the verb rule alone would fake it."""
     req = replace(
         builders.request(method="POST"), host="slack.com", path="/api/conversations.history"
     )
@@ -128,8 +127,7 @@ def test_classify_unmapped_host_keeps_the_host_as_the_service(tmp_path, monkeypa
 
 
 def test_classify_flags_a_declared_unknown_too(tmp_path, monkeypatch):
-    """A map that says `kind: unknown` has looked and does not know, which the agent's operator
-    needs to see for the same reason an unmapped route does."""
+    """A route declared `kind: unknown` is flagged `unclassified`, as an unmapped route is."""
     req = replace(builders.request(method="POST"), host="demo.example", path="/v1/guess")
     cls = classify(req, index_from(tmp_path, monkeypatch, DEMO_MAP))
     assert (cls.operation, cls.kind, cls.flags) == ("things.guess", "unknown", ("unclassified",))
@@ -180,8 +178,7 @@ def test_openai_inference_routes_are_llm(tmp_path, monkeypatch):
 
 
 def test_openai_models_listing_is_a_read_not_llm(tmp_path, monkeypatch):
-    """A models listing is not inference. `llm` also opted the path out of the read overlay,
-    which the engine gates on `kind: read`, so it could never be overlaid either."""
+    """A models listing is a read, not inference, so the read overlay applies to it."""
     cls = _shipped(tmp_path, monkeypatch, "GET", "api.openai.com", "/v1/models")
     assert (cls.operation, cls.kind) == ("models.list", "read")
 
@@ -194,8 +191,9 @@ def test_an_unlisted_openai_write_is_unknown_and_flagged(tmp_path, monkeypatch):
 
 
 def test_an_unlisted_openai_get_falls_back_to_read(tmp_path, monkeypatch):
-    """Intended: with no `default_kind`, the RFC fallback forwards an unlisted GET live. The maps
-    set no default here because `default_kind: write` would turn harmless GETs into fake writes."""
+    """With no `default_kind`, an unlisted GET falls back to a live read.
+
+    `default_kind: write` would turn harmless GETs into faked writes."""
     cls = _shipped(tmp_path, monkeypatch, "GET", "api.openai.com", "/v1/batches")
     assert (cls.service, cls.kind) == ("openai", "read")
     assert cls.flags == ()
@@ -207,8 +205,7 @@ def test_anthropic_messages_is_llm(tmp_path, monkeypatch):
 
 
 def test_anthropic_count_tokens_is_its_own_route(tmp_path, monkeypatch):
-    """Different segment counts, so `/v1/messages` cannot swallow it. The operation proves which
-    route won."""
+    """`/v1/messages/count_tokens` matches its own route, not `/v1/messages`."""
     cls = _shipped(tmp_path, monkeypatch, "POST", "api.anthropic.com", "/v1/messages/count_tokens")
     assert (cls.operation, cls.kind) == ("messages.count_tokens", "llm")
 
@@ -236,22 +233,19 @@ def test_a_posthog_regional_host_classifies(tmp_path, monkeypatch):
     ["o4507.ingest.us.sentry.io", "o4507.ingest.de.sentry.io", "o0.ingest.sentry.io"],
 )
 def test_a_region_qualified_sentry_ingest_host_classifies(tmp_path, monkeypatch, host):
-    """Sentry split ingest by region in 2024. `*.ingest.sentry.io` misses `…ingest.us.sentry.io`
-    entirely, so every DSN issued in roughly the last two years classified as `unknown` and the
-    summary said `unclassified` where it should have said `telemetry`."""
+    """A region-qualified Sentry ingest host (`…ingest.us.sentry.io`) classifies as telemetry.
+
+    `*.ingest.sentry.io` alone does not match it."""
     cls = _shipped(tmp_path, monkeypatch, "POST", host, "/api/4507/envelope/")
     assert (cls.service, cls.operation, cls.kind) == ("sentry", "envelope.send", "telemetry")
     assert cls.flags == ()
 
 
 def test_the_sentry_web_app_is_not_claimed_by_the_ingest_map(tmp_path, monkeypatch):
-    """Why three ingest patterns and not one `*.sentry.io`: sentry.io is also the web app, whose
-    REST control plane would then inherit the telemetry service and be forwarded live.
+    """The Sentry web app's hosts are not telemetry, so its control plane is never forwarded live.
 
-    The probe is a **subdomain**, not the bare host. A `*.x` pattern is keyed `.x` and matched
-    with `endswith`, so bare `sentry.io` misses `*.sentry.io` too - probing it is probing the one
-    host the over-broad pattern would also miss, and the test passes either way.
-    """
+    Subdomains are probed, not the bare host: a `*.x` pattern misses the bare `x` too, so probing
+    `sentry.io` alone would pass under an over-broad pattern."""
     for host in ("sentry.io", "us.sentry.io", "acme.sentry.io"):
         cls = _shipped(tmp_path, monkeypatch, "DELETE", host, "/api/0/projects/acme/web/")
         assert (cls.service, cls.kind) == (host, "unknown"), host
@@ -263,8 +257,7 @@ def test_the_sentry_web_app_is_not_claimed_by_the_ingest_map(tmp_path, monkeypat
 
 
 def test_one_posthog_pattern_covers_the_regional_ingest_hosts(tmp_path, monkeypatch):
-    """`*.posthog.com` matches one *or more* leading labels, so the second `*.i.posthog.com`
-    pattern resolved to the same map and matched nothing the shorter one missed."""
+    """`*.posthog.com` matches one or more leading labels, so it covers `*.i.posthog.com` too."""
     index = index_from(tmp_path, monkeypatch)
     assert index.by_suffix.get(".i.posthog.com") is None
     for host in ("eu.i.posthog.com", "us.i.posthog.com", "eu.posthog.com"):
@@ -275,13 +268,11 @@ def test_one_posthog_pattern_covers_the_regional_ingest_hosts(tmp_path, monkeypa
 @pytest.mark.parametrize(
     ("host", "path", "operation"),
     [
-        # Datadog's sites are three TLDs, not three subdomains: EU1 is `datadoghq.eu` and
-        # US1-FED is `ddog-gov.com`, so `*.datadoghq.com` reached neither.
+        # Datadog's sites are separate domains: EU1 is `datadoghq.eu`, US1-FED `ddog-gov.com`.
         ("http-intake.logs.datadoghq.eu", "/api/v2/logs", "logs.submit"),
         ("api.datadoghq.eu", "/api/v2/series", "series.submit.v2"),
         ("api.ddog-gov.com", "/api/v2/logs", "logs.submit"),
-        # A regional host that is a subdomain of an already-listed one, to prove the existing
-        # patterns were not narrowed while the new ones were added.
+        # A regional subdomain of a listed host, matched by the existing pattern.
         ("api.us3.datadoghq.com", "/api/v2/logs", "logs.submit"),
         # Honeycomb's EU instance and LangSmith's EU tenant are each their own exact host.
         ("api.eu1.honeycomb.io", "/1/batch/ds", "batch.send"),
@@ -289,36 +280,29 @@ def test_one_posthog_pattern_covers_the_regional_ingest_hosts(tmp_path, monkeypa
     ],
 )
 def test_a_regional_telemetry_host_classifies(tmp_path, monkeypatch, host, path, operation):
-    """A pattern that silently never matches, for regional telemetry hosts: a host the map does
-    not claim is not an error, it is intake that gets faked instead of forwarded, and
-    nothing in the output says the map did nothing."""
+    """A regional telemetry host classifies as telemetry, so its intake is forwarded, not faked."""
     cls = _shipped(tmp_path, monkeypatch, "POST", host, path)
     assert (cls.operation, cls.kind, cls.flags) == (operation, "telemetry", ())
 
 
 def test_the_regional_telemetry_patterns_do_not_claim_their_vendors_web_apps(tmp_path, monkeypatch):
-    """Why exact hosts for Honeycomb and LangSmith and patterns only for Datadog: the two `.io` /
-    `.com` names are shared with a web app and a control plane, and `*.honeycomb.io` or
-    `*.smith.langchain.com` would hand those to a live-forwarded service.
+    """Honeycomb's and LangSmith's web apps are not claimed by their telemetry maps.
 
-    Probed with subdomains, not bare hosts: a `*.x` pattern is keyed `.x` and matched with
-    `endswith`, so the bare host misses an over-broad pattern too and would pass either way.
-    """
+    Their domains are shared with a web app and a control plane, so the maps list exact hosts.
+    Subdomains are probed because a `*.x` pattern misses the bare `x` too."""
     index = index_from(tmp_path, monkeypatch)
     for host in ("ui.honeycomb.io", "www.honeycomb.io", "smith.langchain.com", "x.langchain.com"):
         assert index.service_for(host) is None, host
-    # Datadog is a pattern per site, so its own control plane stays inside the map and is caught
-    # by the route rules instead - unlisted, so `unknown` and faked.
+    # Datadog's control plane is inside its map, unlisted, so it is `unknown` and faked.
     cls = _shipped(tmp_path, monkeypatch, "DELETE", "api.datadoghq.eu", "/api/v1/dashboard/abc")
     assert (cls.service, cls.kind, cls.flags) == ("datadog", "unknown", ("unclassified",))
 
 
 def test_an_unlisted_telemetry_write_is_faked_not_forwarded(tmp_path, monkeypatch):
-    """The telemetry maps carry no `default_kind`, on purpose. These vendors serve their REST
-    control plane from the same host as their intake, and `telemetry` forwards live, so a default
-    would have sent `DELETE /api/v1/dashboard/{id}` to the real API under `irimi shadow` - and the
-    `_finish` telemetry guard would have kept it out of the trace too. Unlisted falls to the RFC
-    fallback instead, so an unsafe method is faked and flagged."""
+    """An unlisted write to a telemetry host is faked and flagged, not forwarded live.
+
+    These vendors serve their control plane from the intake host, so the telemetry maps set no
+    `default_kind`."""
     cls = _shipped(tmp_path, monkeypatch, "DELETE", "api.datadoghq.com", "/api/v1/dashboard/abc")
     assert (cls.service, cls.kind) == ("datadog", "unknown")
     assert cls.flags == ("unclassified",)
@@ -340,7 +324,7 @@ def test_no_telemetry_control_plane_write_is_forwarded(tmp_path, monkeypatch, ho
 
 
 def test_a_listed_intake_path_is_still_telemetry(tmp_path, monkeypatch):
-    """The other half: listing the routes explicitly is what keeps real intake forwarding live."""
+    """A listed intake route is telemetry, so real intake is forwarded live."""
     cls = _shipped(tmp_path, monkeypatch, "POST", "api.datadoghq.com", "/api/v2/logs")
     assert (cls.service, cls.kind, cls.flags) == ("datadog", "telemetry", ())
 
@@ -352,17 +336,16 @@ def test_the_slack_webhook_is_a_named_write(tmp_path, monkeypatch):
 
 
 def test_a_webhook_url_of_another_shape_still_falls_back_to_unknown(tmp_path, monkeypatch):
-    """No `*` path wildcard, so a two-segment webhook path misses the route and the fallback
-    catches it: still answered locally, and flagged so the operator sees the guess."""
+    """A webhook path of another shape is `unknown`: answered by irimi and flagged."""
     cls = _shipped(tmp_path, monkeypatch, "POST", "hooks.slack.com", "/services/T000/B000")
     assert (cls.service, cls.kind) == ("slack", "unknown")
     assert cls.flags == ("unclassified",)
 
 
 def test_classify_reports_the_service_map_even_when_no_route_matched(tmp_path, monkeypatch):
-    """A service-level target has to reach the routes its own map does not list, and for those
-    `matched` is None. Without this field the policy could not tell "unmapped host" from
-    "mapped host, unlisted route"."""
+    """`service_map` is set for an unlisted route on a mapped host, where `matched` is None.
+
+    It tells an unmapped host from an unlisted route, so a service-level target reaches both."""
     index = index_from(tmp_path, monkeypatch)
     listed = classify(replace(builders.request(method="POST"), path="/v1/refunds"), index)
     assert listed.matched is not None

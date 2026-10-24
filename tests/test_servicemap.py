@@ -1,5 +1,4 @@
-"""Service maps: the shipped ones, the schema the loader holds a map to, the overrides file and
-the `--target` flags."""
+"""Service maps: the shipped ones, the loader's schema, the overrides file and `--target`."""
 
 import os
 from pathlib import Path
@@ -71,10 +70,8 @@ def test_shipped_slack_map_is_rpc_style_and_owns_the_webhook_host():
 def test_no_shipped_route_downgrades_a_write_to_a_read():
     """The classification invariant: a declared write is never a read without `live_because:`.
 
-    `_check_route_rules` refuses it at load time for a `style: rest` service, so a violation is a
-    MapError rather than a silent downgrade; this asserts the property itself, so it keeps holding
-    if the rule ever moves. A `style: rpc` service is exempt by design: its SDKs POST every call,
-    so there is no honest verb to downgrade from.
+    The loader refuses one for a `style: rest` service; this holds the property itself. A
+    `style: rpc` service is exempt: its SDKs POST every call.
     """
     index = servicemaps.load(maps_dir=servicemaps.loader.shipped_dir())
     rest = [sm for sm in index.services if sm.style == "rest"]
@@ -86,8 +83,9 @@ def test_no_shipped_route_downgrades_a_write_to_a_read():
 
 
 def test_slack_read_templates_still_name_the_channel():
-    """An unquoted `#` starts a YAML comment, so `human: look up #{channel}` would load as
-    `look up`. The three Slack reads that name a channel have to stay quoted in the file."""
+    """The Slack reads that name a channel keep `#{channel}` in their template.
+
+    An unquoted `#` starts a YAML comment, so `look up #{channel}` would load as `look up`."""
     index = servicemaps.load(maps_dir=servicemaps.loader.shipped_dir())
     slack = index.service_for("slack.com")
     assert slack is not None
@@ -132,7 +130,7 @@ MAP_FILE_NAMES = [
     "telemetry.yaml",
 ]
 
-# The L1 response fixtures, one JSON file per service that has any.
+# The response fixtures, one JSON file per service that has any.
 FIXTURE_FILE_NAMES = ["slack.json", "stripe.json"]
 
 
@@ -144,23 +142,11 @@ def test_the_shipped_maps_directory_holds_every_map():
 
 
 def test_the_shipped_maps_and_fixtures_are_inside_a_built_wheel(tmp_path):
-    """The maps are data files, and a wheel that drops them is an install that refuses to start.
+    """A built wheel holds the shipped maps, the fixtures and `py.typed`.
 
-    This builds one and looks inside it. Reading `shipped_dir()` instead reads the *source tree*,
-    so it would pass for a packaging change that ships no YAML at all: hatchling's default file
-    selection honours `.gitignore`, so one `*.yaml` line there, or an `exclude` in pyproject,
-    empties `irimi/maps/` in the wheel while the working copy still looks right. That install
-    then fails on `irimi maps list` with a named refusal, which is the failure this test exists
-    to get ahead of.
-
-    The L1 fixtures ride along for the same reason and are checked in the same wheel, because
-    building a second one somewhere else would double the slowest test in the suite. A wheel
-    without them is subtler than one without maps: every mapped write still answers, at L0 with
-    the `fixture-failed` flag, so only the trace says anything is wrong.
-
-    A skip here is an environment that cannot build (no `uv`, no network for the build backend),
-    not a packaging verdict: the assertion is about what is inside a wheel, so with no wheel there
-    is nothing to assert. Run with `-rs` to see it.
+    It builds one rather than reading `shipped_dir()`, the source tree: a `.gitignore` line or a
+    pyproject `exclude` can empty the wheel's data while the working copy looks right. A skip means
+    the environment cannot build a wheel (`-rs` shows it).
     """
     import shutil
     import subprocess
@@ -241,9 +227,10 @@ def test_an_index_looks_up_a_service_and_a_route_by_host(tmp_path):
 
 
 def test_a_route_is_found_by_its_operation_when_its_path_cannot_be_matched(tmp_path):
-    """A stored request on a credential-path host has a placeholder for a path, and its write line
-    finds the route by the operation it recorded instead. Only one route may answer: two that
-    name the operation for this method are no answer, and so is a method the route does not take."""
+    """A redacted path finds its route by the recorded operation, when exactly one route answers.
+
+    Two routes naming the operation for this method are no answer, nor is a method it does not
+    take."""
     index = load_docs(tmp_path)
     found = index.route_named("DEMO.EXAMPLE", "post", "things.create")
     assert found is not None and found.path == "/v1/things"
@@ -408,9 +395,7 @@ def test_empty_and_invalid_files_are_refused(tmp_path):
 
 
 def test_a_fixture_on_a_live_route_is_refused(tmp_path):
-    """A live route is answered by the real service, so a `fixture:` on it is never read. A key
-    that reads as configured and is never consulted misleads whoever wrote it, so the loader names
-    it instead of ignoring it."""
+    """The loader refuses a `fixture:` on a live route, which the real service answers."""
     assert_refused(
         tmp_path,
         GOOD_MAP.replace("    human: list things", "    fixture: thing"),
@@ -430,9 +415,9 @@ def test_a_fixture_on_an_unknown_route_is_allowed(tmp_path):
 
 
 def test_every_shipped_precondition_names_a_check_that_exists():
-    """`precondition:` is the opt-in and `Service.preconditions` is what it opts into. A shipped
-    name with no entry would degrade to `not_evaluable` on every write, silently - a key that reads
-    as configured and is never consulted."""
+    """Every shipped `precondition:` names an entry in its `Service.preconditions`.
+
+    One with no entry would make every such write `not_evaluable`, silently."""
     index = servicemaps.load(cwd=None, maps_dir=servicemaps.loader.shipped_dir())
     named = [
         (sm.service, route.precondition)
@@ -446,8 +431,7 @@ def test_every_shipped_precondition_names_a_check_that_exists():
 
 
 def test_a_precondition_on_a_live_route_is_refused(tmp_path):
-    """A live route is forwarded to the real service, which checks its own preconditions, so a
-    `precondition:` on it would never run."""
+    """The loader refuses a `precondition:` on a live route, which would never run."""
     assert_refused(
         tmp_path,
         GOOD_MAP.replace("    human: list things", "    precondition: thing_exists"),
@@ -456,11 +440,10 @@ def test_a_precondition_on_a_live_route_is_refused(tmp_path):
 
 
 def test_every_shipped_fires_list_is_pinned_to_the_writes_the_effects_model():
-    """`fires:` is free text with no table to check a name against, so the shipped values are
-    pinned here instead. The three routes are exactly the three writes
-    `services/stripe/effects.py` models an effect for: a route that fires an event the overlay
-    does not model is a write whose visible effect and its webhooks disagree, so a fourth route
-    gaining `fires:` breaks this test and has to be thought about rather than drifting in."""
+    """The shipped `fires:` lists are pinned to the three writes Stripe's effects model.
+
+    `fires:` is free text, and a route firing an event the overlay does not model is a write whose
+    visible effect and webhooks disagree."""
     index = servicemaps.load(maps_dir=servicemaps.loader.shipped_dir())
     fired = {
         (sm.service, route.operation): route.fires
@@ -476,8 +459,7 @@ def test_every_shipped_fires_list_is_pinned_to_the_writes_the_effects_model():
 
 
 def test_every_shipped_fires_route_is_a_write_irimi_answers_itself():
-    """A live route is forwarded and the real service sends its own webhooks, so `fires:` on one
-    would never be read. The loader refuses it; this holds that no shipped map has one."""
+    """No shipped route with `fires:` is live: the real service sends its own webhooks."""
     index = servicemaps.load(maps_dir=servicemaps.loader.shipped_dir())
     for sm in index.services:
         for route in sm.routes:
@@ -486,9 +468,7 @@ def test_every_shipped_fires_route_is_a_write_irimi_answers_itself():
 
 
 def test_fires_on_a_live_route_is_refused(tmp_path):
-    """A live route is forwarded to the real service, which sends its own webhooks, so a `fires:`
-    on it would never be listed - the `--base-url-host` class of key that reads as configured and is
-    never consulted."""
+    """The loader refuses `fires:` on a live route, whose webhooks the real service sends."""
     assert_refused(
         tmp_path,
         GOOD_MAP.replace("    human: list things", "    fires:\n      - thing.listed"),
@@ -508,8 +488,7 @@ def test_fires_on_an_unknown_route_is_allowed(tmp_path):
 
 
 def test_a_repeated_event_name_in_fires_is_refused(tmp_path):
-    """The summary prints this list as it is given, so a repeat would promise one write's event
-    twice - the untruth the `{name}` uniqueness rule stops one scope down."""
+    """A repeat in `fires:` is refused: the summary would list one write's event twice."""
     assert_refused(
         tmp_path,
         GOOD_MAP.replace(
@@ -521,8 +500,7 @@ def test_a_repeated_event_name_in_fires_is_refused(tmp_path):
 
 
 def test_a_misspelled_fires_key_is_refused(tmp_path):
-    """A misspelled route key is still rejected: `ROUTE_KEYS` is a closed set, so `fired:` is
-    refused by name rather than read as configured and ignored."""
+    """`ROUTE_KEYS` is a closed set, so `fired:` is refused by name, not ignored."""
     assert_refused(
         tmp_path,
         GOOD_MAP.replace("    fixture: thing", "    fired:\n      - thing.created"),
@@ -870,11 +848,9 @@ def test_a_directory_with_no_yaml_is_the_same_refusal(tmp_path):
 
 
 def test_a_maps_directory_that_cannot_be_scanned_is_a_named_refusal(tmp_path, monkeypatch):
-    """The same refusal as the test below, reached without a directory mode, so it also runs as
-    root - in a root CI container the mode-based one skips and this path was then uncovered.
+    """An OSError from `iterdir` is a named refusal, without a directory mode, so it runs as root.
 
-    The OSError is raised from `iterdir` itself, which is where a real unreadable directory raises
-    it: everything between there and the MapError is the code under test.
+    The mode-based test below skips as root.
     """
     directory = tmp_path / "locked"
     directory.mkdir()
@@ -895,8 +871,7 @@ def test_a_maps_directory_that_cannot_be_scanned_is_a_named_refusal(tmp_path, mo
 
 
 def test_an_unreadable_maps_directory_is_a_named_refusal(tmp_path):
-    """The same refusal against a real directory mode, which is the thing that actually happens
-    on a stripped install. It cannot run as root, which is why the test above exists."""
+    """A maps directory with mode 000 is a named refusal; root, which ignores modes, skips it."""
     import os
 
     if os.geteuid() == 0:
@@ -989,8 +964,7 @@ def test_a_wildcard_host_matches_one_or_more_leading_labels(tmp_path):
 
 
 def test_a_wildcard_host_does_not_match_the_bare_domain(tmp_path):
-    """`*.demo.example` claims subdomains only; the stored suffix keeps its leading dot so that
-    `demo.example` itself, and a name merely ending in it, both miss."""
+    """`*.demo.example` misses `demo.example` and a name merely ending in it."""
     index = load_docs(tmp_path, WILDCARD)
     assert index.service_for("demo.example") is None
     assert index.service_for("notdemo.example") is None
@@ -1042,10 +1016,10 @@ def test_a_wildcard_and_an_exact_host_under_it_are_not_a_duplicate(tmp_path):
 
 
 def test_patterns_are_not_in_the_reverse_doors_allow_list(tmp_path):
-    """A wildcard classifies through the forward door and is deliberately not an allow-list entry.
+    """A wildcard host classifies through the proxy but is not a base-URL host.
 
-    `pipeline.rewrite_reverse` compares one literal host with `host not in allowed_hosts`, so a
-    pattern in that set would never match anything. `--base-url-host` is how you reach one.
+    Base-URL mode compares one literal host against its allowed set, so a pattern there would match
+    nothing; `--base-url-host` names one.
     """
     index = load_docs(tmp_path, WILDCARD, EXACT_UNDER_WILDCARD)
     assert index.hosts == frozenset({"one.demo.example"})
@@ -1057,12 +1031,10 @@ def test_patterns_are_not_in_the_reverse_doors_allow_list(tmp_path):
 
 
 def test_the_conftest_redirects_irimi_home_away_from_the_developers_own(tmp_path):
-    """Guard the `$IRIMI_HOME` half of `tests/conftest.py`.
+    """`tests/conftest.py` points `$IRIMI_HOME` away from the developer's own.
 
-    Without its `monkeypatch.setenv` the rest of the suite stays green on a clean box and fails
-    only for a developer who followed the README and created `~/.irimi/maps.yaml`. This fails on
-    every box: the env var is gone, so the lookup below raises, and the overrides file the loader
-    then reads is the real one. Renaming the `cwd` half fails four tests immediately.
+    Without it the suite fails only for a developer with a `~/.irimi/maps.yaml`; this fails on
+    every machine.
     """
     home = Path(os.environ[paths.IRIMI_HOME_ENV])
     assert home != Path.home() / ".irimi"
@@ -1083,9 +1055,7 @@ def test_the_conftest_redirects_irimi_home_away_from_the_developers_own(tmp_path
 
 
 def test_path_params_binds_nothing_when_the_literal_segments_differ():
-    """`path_params` asks `_match_path`, which is the whole reason it lives in this module. A
-    segment count alone would bind `customer` to a path that shares no literal with the pattern
-    - the second parser its own docstring exists to prevent."""
+    """`path_params` binds nothing to a path that shares the segment count but not the literals."""
     assert servicemaps.path_params("/v1/customers/{customer}", "/v9/charges/cus_X") == {}
     assert servicemaps.path_params("/v1/customers/{customer}", "/v1/customers/cus_X") == {
         "customer": "cus_X"
@@ -1094,9 +1064,9 @@ def test_path_params_binds_nothing_when_the_literal_segments_differ():
 
 
 def test_path_params_percent_decodes_a_captured_segment():
-    """The service decodes it, so we do: `cus%5FREAL123` is the same customer as `cus_REAL123`,
-    and reading the raw segment would make `policy.named_id` mint a fresh id for a resource the
-    request already named. Literal segments are still compared raw, so this cannot widen a match."""
+    """A captured segment is percent-decoded, as the service decodes it; literals compare raw.
+
+    `cus%5FREAL123` is `cus_REAL123`, so the echo reuses the id the request named."""
     assert servicemaps.path_params("/v1/customers/{customer}", "/v1/customers/cus%5FX") == {
         "customer": "cus_X"
     }
@@ -1106,8 +1076,7 @@ def test_path_params_percent_decodes_a_captured_segment():
 
 
 def test_a_route_pattern_may_not_repeat_a_parameter_name(tmp_path):
-    """`/a/{x}/b/{x}` binds `x` once and drops the first capture silently, which is how
-    `named_id` would come to echo the wrong id."""
+    """`/a/{x}/b/{x}` is refused: it would drop one capture and echo the wrong id."""
     doc = """
 version: 1
 service: dup
@@ -1164,8 +1133,7 @@ def test_a_host_and_path_target_sets_only_the_matching_targetable_routes(tmp_pat
 
 @pytest.mark.parametrize("spec", ["/v1/things/{thing}/archive", "/v1/things/th_REAL1/archive"])
 def test_a_target_path_may_be_the_pattern_or_a_real_path(tmp_path, spec):
-    """The caller should not have to know how the map spells its `{…}` segment, so a concrete
-    request path names the route as well as the pattern does."""
+    """A target names its route by the map's pattern or by a concrete request path."""
     index = servicemaps.load(
         cwd=tmp_path / "cwd",
         maps_dir=write_maps(tmp_path, WITH_PATTERN_WRITE),
@@ -1186,8 +1154,7 @@ def test_target_reads_marks_the_service_delegated(tmp_path):
 
 
 def test_target_reads_without_a_target_is_still_refused_when_it_comes_from_a_flag(tmp_path):
-    """The load-time rule holds however the value arrived: a service irimi answers end to end
-    would be the twin the design rejects, and `--target-reads` must not be a way around it."""
+    """`--target-reads` with no target is refused, as `target_reads: true` in a map is."""
     with pytest.raises(MapError) as exc:
         _flagged(tmp_path, target_reads=["demo.example"])
     assert str(exc.value).endswith(
@@ -1219,16 +1186,14 @@ def test_a_flag_target_is_validated_like_every_other_one(tmp_path):
     ],
 )
 def test_a_target_url_python_cannot_parse_is_a_named_refusal(tmp_path, url, message):
-    """`urlsplit` and its `.port` accessor both raise ValueError on input a user can type, and a
-    ValueError escaping the loader is an uncaught traceback out of `irimi serve` rather than the
-    one-line refusal every other bad target gets."""
+    """A target `urlsplit` or its `.port` raises on is a one-line MapError, not a traceback."""
     with pytest.raises(MapError) as exc:
         _flagged(tmp_path, targets=[("demo.example", "", url)])
     assert message in str(exc.value)
 
 
 def test_a_flag_naming_an_unknown_host_or_route_is_an_error(tmp_path):
-    """A typo that quietly changed nothing would look exactly like a working delegation."""
+    """A typo that quietly changed nothing would look exactly like a working target."""
     with pytest.raises(MapError) as exc:
         _flagged(tmp_path, targets=[("nope.example", "", "http://127.0.0.1:3000")])
     assert "no loaded service map claims host" in str(exc.value)
@@ -1253,8 +1218,7 @@ def test_a_flag_target_beats_the_overrides_file(tmp_path):
 
 
 def test_a_credential_path_host_may_only_be_targeted_at_loopback():
-    """A Slack incoming webhook URL is the whole credential, so `--allow-remote-target` does not
-    reach it: sending one off this machine hands the secret to whoever is listening."""
+    """`--allow-remote-target` does not reach a webhook host, whose URL is the whole credential."""
     index = servicemaps.load(
         cwd=None,
         maps_dir=servicemaps.loader.shipped_dir(),
@@ -1275,8 +1239,7 @@ def test_a_credential_path_host_may_only_be_targeted_at_loopback():
 
 
 def test_the_rule_follows_the_host_through_the_overrides_file_too(tmp_path):
-    """Load time is the one place all three layers have already merged, so the shipped map, the
-    overrides file and `--target` are all covered by the same check."""
+    """The webhook rule holds for a flag target too: it is checked once the map layers merge."""
     with pytest.raises(MapError) as exc:
         servicemaps.load(
             cwd=None,
@@ -1288,8 +1251,7 @@ def test_the_rule_follows_the_host_through_the_overrides_file_too(tmp_path):
 
 
 def test_the_webhook_rule_covers_the_other_host_of_the_same_service():
-    """Routes match per service, not per host: `slack.com/services/...` resolves to the same
-    `incoming_webhook` route, so targeting the service by either host hits the rule."""
+    """The webhook rule holds when the service is targeted by its other host, `slack.com`."""
     with pytest.raises(MapError):
         servicemaps.load(
             cwd=None,
@@ -1399,7 +1361,7 @@ def test_a_map_may_declare_credential_path_hosts_of_its_own(tmp_path):
     doc = GOOD_MAP.replace("routes:", "credential_path_hosts:\n  - files.demo.example\nroutes:", 1)
     sm = load_docs(tmp_path, doc).services[0]
     assert sm.credential_path_hosts == frozenset({"files.demo.example"})
-    # The code's floor still applies on top of whatever a map declares.
+    # The code's own credential-path hosts apply on top of whatever a map declares.
     assert sm.credential_hosts == frozenset({"files.demo.example", "hooks.slack.com"})
 
 
@@ -1442,8 +1404,7 @@ def test_the_shipped_maps_pass_the_services_check():
 
 
 def test_every_map_set_a_user_can_start_with_passes_the_services_check(tmp_path, monkeypatch):
-    """Maps ship with irimi, and an overrides file and the target flags only set targets, so no
-    user configuration leaves out a service or an operation `services.check` requires."""
+    """Overrides and target flags only set targets, so they pass `services.check`."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "home"))
     (tmp_path / servicemaps.loader.CWD_OVERRIDE_NAME).write_text(
         "service: slack\ntarget: http://127.0.0.1:3000\n---\n"
@@ -1522,8 +1483,7 @@ def test_the_services_check_refuses_a_name_the_tables_do_not_know(
 
 
 def test_every_operation_the_answers_key_on_is_declared_by_its_service():
-    """`services.check` holds the declared operations to the maps; this holds each service's
-    answer tables to the declarations."""
+    """Each service's answer tables key only on operations the service declares."""
     from irimi.services.slack import answers as slack_answers
 
     assert set(slack_answers.SLACK_ENVELOPES) <= services.REGISTRY["slack"].operations

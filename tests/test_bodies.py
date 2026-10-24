@@ -86,24 +86,23 @@ def test_an_answer_for_an_unparseable_body_is_still_json():
 
 
 def test_a_bracket_nested_form_field_becomes_a_nested_object():
-    """stripe-python posts `metadata[order_id]=6735`; the live API always answers with
-    `metadata`. Flat, `Refund.metadata` raised AttributeError - the bar policy.py sets itself."""
+    """stripe-python's `metadata[order_id]=6735` echoes as a nested `metadata` object.
+
+    The live API always answers with `metadata`, so a flat echo makes `Refund.metadata` raise."""
     body = bodies.parse_form("charge=ch_test&amount=4900&metadata[order_id]=6735")
     assert body == {"charge": "ch_test", "amount": 4900, "metadata": {"order_id": "6735"}}
 
 
 def test_a_metadata_value_stays_a_string_at_any_depth():
-    """A Stripe metadata value is always a string on the live API, so coercing one hands back
-    something other than what the caller sent. The field name is what decides, wherever it
-    sits on the path into the value."""
+    """A metadata value stays a string at any depth: the field name decides, wherever it sits."""
     assert bodies.parse_form("metadata[n]=6735")["metadata"]["n"] == "6735"
     assert bodies.parse_form("a[metadata][n]=6735")["a"]["metadata"]["n"] == "6735"
 
 
 def test_a_nested_number_is_a_number_like_the_same_number_at_the_top_level():
-    """`line_items[0][quantity]=2` echoed `"2"` while `amount=4900` echoed `4900`, so
-    `quantity * 2` was `"22"` with no raise. "Stays a string" is right for `metadata` and wrong
-    for every other numeric nested field."""
+    """A nested numeric field is coerced like a top-level one; only `metadata` stays a string.
+
+    An uncoerced `quantity` makes `quantity * 2` evaluate to `"22"` without raising."""
     assert bodies.parse_form("n=6735")["n"] == 6735
     body = bodies.parse_form("line_items[0][quantity]=2&line_items[0][price]=price_1")
     assert body == {"line_items": [{"quantity": 2, "price": "price_1"}]}
@@ -145,8 +144,9 @@ def test_an_indexed_form_key_becomes_a_list_only_when_the_indices_are_complete(t
     ],
 )
 def test_a_bracket_shape_we_will_not_guess_at_stays_flat(text, expected):
-    """Echoing an odd key unchanged is wrong in a small, visible way; guessing is worse. The
-    whole dict is asserted: a membership check here would pass on an empty result too."""
+    """An odd bracket shape echoes unchanged rather than guessed at.
+
+    The whole dict is asserted: a membership check would pass on an empty result too."""
     assert bodies.parse_form(text) == expected
 
 
@@ -154,8 +154,7 @@ def test_a_bracket_shape_we_will_not_guess_at_stays_flat(text, expected):
     "text", ["a=2&a[0]=1", "a[0]=1&a=2", "a[0]=1&a=2&a[1]=3", "a=2&a[0]=1&a=9"]
 )
 def test_a_bracketed_key_beats_a_bare_one_in_either_order(text):
-    """The same name spelled both ways is nonsense input, but it must not be order-dependent:
-    form-body structure must survive parsing, and a bare value cannot carry any."""
+    """A bracketed key beats a bare one of the same name, whichever arrives first."""
     result = bodies.parse_form(text)
     assert isinstance(result["a"], list), result
     assert 1 in result["a"]
@@ -163,8 +162,7 @@ def test_a_bracketed_key_beats_a_bare_one_in_either_order(text):
 
 @pytest.mark.parametrize("text", ["a[0][b]=1&a[0]=2", "a[0]=2&a[0][b]=1"])
 def test_a_bracket_path_beats_a_scalar_at_the_same_leaf_in_either_order(text):
-    """The same class one level down, and the same answer: the deeper structure survives, so the
-    echo does not depend on which spelling arrived first."""
+    """A deeper bracket path beats a scalar at the same leaf, whichever arrives first."""
     assert bodies.parse_form(text) == {"a": [{"b": 1}]}
 
 
@@ -179,9 +177,10 @@ def test_an_append_beats_a_bare_key_of_the_same_name_in_either_order(text):
 
 
 def test_an_empty_bracket_pair_is_a_list(tmp_path):
-    """`expand[]=a&expand[]=b` is Stripe's own documented curl spelling. It echoed the literal
-    JSON key `"expand[]"`, which is a field no SDK looks for. One repeat or none, the shape
-    is the same: a caller writing `[]` means a list either way."""
+    """An empty bracket pair is a list, with one repeat or none.
+
+    `expand[]=a&expand[]=b` is Stripe's documented curl spelling; a literal `"expand[]"` key is a
+    field no SDK looks for."""
     assert bodies.parse_form("expand[]=a&expand[]=b") == {"expand": ["a", "b"]}
     assert bodies.parse_form("expand[]=a") == {"expand": ["a"]}
     assert bodies.parse_form("charge=ch_1&expand[]=a") == {"charge": "ch_1", "expand": ["a"]}
@@ -197,12 +196,11 @@ def _nest(depth: int):
 
 
 def test_a_bracket_path_deeper_than_the_cap_stays_flat():
-    """Unwinding a thousand-level nest is a RecursionError inside a mitmproxy hook, and a hook
-    that raises forwards the flow - which for a write means it escapes shadow mode. The cap is
-    twice Stripe's deepest real key, `line_items[0][price_data][product_data][name]`."""
-    # The value, not just the mechanism: written only against the constant, this test passes
-    # with a cap of 2, which would flatten Stripe's real
-    # `line_items[0][price_data][product_data][name]` (5 segments) and ship green.
+    """A bracket path deeper than the cap stays flat instead of recursing inside a hook.
+
+    A RecursionError in a mitmproxy hook would break the fail-closed hook rule. The cap is twice
+    Stripe's deepest real key, `line_items[0][price_data][product_data][name]`."""
+    # Pin the value too: a cap of 2 would flatten Stripe's real 5-segment key and still pass.
     assert bodies._MAX_FORM_DEPTH == 8
     assert bodies.parse_form("line_items[0][price_data][product_data][name]=x") == {
         "line_items": [{"price_data": {"product_data": {"name": "x"}}}]
@@ -219,7 +217,7 @@ def test_parse_form_never_raises_on_hostile_input():
 
 
 def test_a_hostile_form_body_still_reflects_and_never_raises():
-    """The end-to-end guarantee: whatever the body, the policy answers locally."""
+    """Whatever the form body, irimi answers the write itself."""
     request = make_request(
         "POST",
         path="/v1/refunds",

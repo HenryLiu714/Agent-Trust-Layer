@@ -27,8 +27,7 @@ def summary_lines(
     tls_failures=None,
     ca_cert=None,
 ):
-    """The summary `irimi shadow` prints for a run whose engine reported `exchanges` and
-    `tool_calls`."""
+    """The summary `irimi shadow` prints for a run of these `exchanges` and `tool_calls`."""
     view = RunView(RunRecord.header(run_id), [*map(for_summary, exchanges), *tool_calls])
     live = Live(sdk_runs or {}, tls_failures or {}, ca_cert)
     return summary.summary_lines(view, index, elapsed_s, live)
@@ -88,8 +87,9 @@ def _refund(
 
 
 def _unreachable(target="http://127.0.0.1:3999/refund"):
-    """A delegated write whose target could not be dialled: `IrimiAddon.error` records it with no
-    response and the `target-failed` flag, exactly as a stub that is not running produces."""
+    """A write sent to a target that could not be dialled, as the engine records it.
+
+    No response and the `target-failed` flag, as a stub that is not running produces."""
     return _refund(
         answered_by="delegated",
         target=target,
@@ -172,8 +172,7 @@ def test_refused_tls_handshakes_are_counted_per_host_with_the_ca_to_point_at():
 
 
 def test_exchange_line_columns_line_up_for_the_nine_character_values():
-    """The kind column is nine wide for `telemetry`, and the first column as wide as its longest
-    word, so no row is pushed a column right in the most-read output the tool produces."""
+    """The kind column fits `telemetry` and the first column its longest word, so rows line up."""
     lines = [
         exchange_line(_exchange(answered_by=answered_by, kind=kind))
         for answered_by, kind in [
@@ -227,7 +226,7 @@ def _index(*services):
 
 
 def test_a_service_with_no_target_adds_no_banner_line():
-    """No delegated service, no new lines: the banner a reader already knows stays as it was."""
+    """No targeted service, no new lines: the banner a reader already knows stays as it was."""
     assert delegated_lines(_index(_service(routes=(_route(),)))) == []
 
 
@@ -295,8 +294,7 @@ def _block(lines, needle):
 
 
 def _host(lines, host="api.stripe.com"):
-    """`host`'s line in the per-host block. A write line can name a host too, in its request, so
-    the line is found by the host column it starts with."""
+    """`host`'s line in the per-host block, found by the host column it starts with."""
     return next(line for line in lines if line.startswith(f"  {host} "))
 
 
@@ -318,27 +316,26 @@ def test_a_host_line_separates_reads_from_intercepted_writes():
 
 
 def test_a_delegated_read_is_never_counted_as_a_live_read():
-    """The claim behind `reads are real` is what that count means to whoever reads it, and a read
-    answered by a target is not a real read."""
+    """A read answered by a target is not counted among the real reads."""
     rows = [_exchange(), _exchange(answered_by="delegated", target="http://127.0.0.1:3000")]
     line = _host(summary_lines("7f3a", rows, 0.0, _maps()))
     assert line == "  api.stripe.com  1 read  1 read from the target"
 
 
 def test_an_overlaid_read_is_a_real_read_and_says_it_shows_the_run_s_writes():
-    """An overlaid read DID reach the real service, so leaving it out of the read count would
-    understate the reads the agent really made. Its body is not what the service
-    sent, though, so the line says that too."""
+    """An overlaid read reached the real service, so it counts as a real read.
+
+    Its body is not what the service sent, so the line says that too."""
     rows = [_exchange(), _exchange(answered_by="overlay")]
     line = _host(summary_lines("7f3a", rows, 0.0, _maps()))
     assert line == "  api.stripe.com  2 reads (1 showing this run's writes)"
 
 
 def test_a_read_answered_from_the_recording_is_a_read_and_says_so():
-    """A replay answers a read with what the recorded run was sent: a real read, made by the
-    recorded run, so it is counted with the reads, as what it was - one the overlay edited is
-    still overlaid - and qualified by its `from-recording` flag. irimi answered it, not the
-    service, so the totals count it answered by irimi."""
+    """A read answered from the recording counts as a read, flagged `from-recording`.
+
+    The recorded run made it, so it is counted as what it was; the totals count it answered by
+    irimi."""
     rows = [
         _exchange(),
         _exchange(answered_by="overlay", flags=(Flag.FROM_RECORDING,)),
@@ -361,8 +358,7 @@ def test_llm_calls_answered_from_the_recording_say_so():
 
 
 def test_a_replayed_read_the_overlay_could_not_complete_names_who_answered_it():
-    """A read flagged `partial` the overlay left alone is whoever answered it: the service, or a
-    replay's recording, which is not `real`."""
+    """A `partial` read the overlay left alone names who answered it: service or recording."""
     refund = _refund()
     read = dataclasses.replace(
         _exchange(), answered_by="recording", overlay="partial", flags=(Flag.FROM_RECORDING,)
@@ -372,8 +368,7 @@ def test_a_replayed_read_the_overlay_could_not_complete_names_who_answered_it():
 
 
 def test_an_overlaid_read_is_counted_live_and_never_virtualized():
-    """`answered by irimi` means irimi answered instead of the service. It answered this one WITH
-    the service, so counting it there would claim a read the agent really made was fabricated."""
+    """An overlaid read counts as real, not answered by irimi: the service answered it too."""
     rows = [_exchange(answered_by="overlay"), _refund()]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert _totals(lines) == (
@@ -402,8 +397,7 @@ def test_llm_gets_its_own_word():
 
 
 def test_every_telemetry_host_shares_one_line():
-    """A run posts to three vendors in the same breath; a line each would bury the two hosts the
-    agent's actual work is on. It says they were forwarded live, because they really were."""
+    """Telemetry hosts share one line, saying they went live, so the agent's hosts stay visible."""
     rows = [
         _exchange(kind="telemetry", host="api.datadoghq.com", service="datadog", method="POST"),
         _exchange(kind="telemetry", host="api.datadoghq.com", service="datadog", method="POST"),
@@ -415,8 +409,7 @@ def test_every_telemetry_host_shares_one_line():
 
 
 def test_a_telemetry_host_still_gets_a_host_line_for_its_control_plane_writes():
-    """`kind` is per route: a DELETE on a dashboard is a write on the same host the logs go to,
-    and lumping it into the telemetry line would hide a write behind a host's other traffic."""
+    """A write on a telemetry host gets its own host line; `kind` is per route."""
     rows = [
         _exchange(kind="telemetry", host="api.datadoghq.com", service="datadog", method="POST"),
         _exchange(
@@ -439,12 +432,9 @@ def test_a_write_is_rendered_from_the_maps_human_template():
 
 
 def test_an_amount_with_no_currency_in_the_request_is_left_as_it_was_sent():
-    """Dividing by 100 without knowing the currency prints ¥49.00 for a 4900-yen refund, which is
-    a wrong number rather than an unformatted one, so the amount says it is in minor units.
+    """An amount with no known currency prints as minor units, never divided by 100.
 
-    A write MAY be denominated by the L3 precondition read that checked it - the charge's own
-    `currency`, carried across on the exchange. This write had no such read, so nothing knows
-    what it is in."""
+    Dividing would print ¥49.00 for a 4900-yen refund. No check read gave this write a currency."""
     lines = summary_lines("7f3a", [_refund(body=b"charge=ch_9&amount=4900")], 0.0, _maps())
     assert (
         "  ○ stripe  refund 4900 (minor units, currency unknown) on ch_9  faked; not checked"
@@ -453,8 +443,7 @@ def test_an_amount_with_no_currency_in_the_request_is_left_as_it_was_sent():
 
 
 def test_an_amount_is_denominated_by_the_currency_the_l3_read_found():
-    """The write names no currency; the charge irimi read before faking it does,
-    and the exchange carries it across."""
+    """A write naming no currency takes the one irimi's check read found on the charge."""
     write = replace(
         _refund(body=b"charge=ch_9&amount=4900"), precondition=Precondition(currency="usd")
     )
@@ -463,8 +452,7 @@ def test_an_amount_is_denominated_by_the_currency_the_l3_read_found():
 
 
 def test_the_requests_own_currency_still_wins_over_the_one_the_read_found():
-    """The request is what the caller actually said. A charge in usd and a refund posted in jpy is
-    the caller's business to be wrong about, not irimi's to correct."""
+    """The request's own currency wins over the check read's: irimi does not correct the caller."""
     write = replace(
         _refund(body=b"charge=ch_9&amount=4900&currency=jpy"),
         precondition=Precondition(currency="usd"),
@@ -474,8 +462,7 @@ def test_the_requests_own_currency_still_wins_over_the_one_the_read_found():
 
 
 def test_a_rejected_write_is_denominated_the_same_way():
-    """`report.summary.write_sentence` renders the sentence before it branches on the rejection, so
-    the `✗` line carries an amount too and must read the same as the `○` one."""
+    """A `✗` line formats its amount as the `○` line does."""
     write = replace(
         _refund(body=b"charge=ch_9&amount=4900"),
         precondition=Precondition("rejected", "charge_already_refunded", "usd"),
@@ -499,8 +486,7 @@ def test_a_currency_with_no_symbol_is_named():
 
 
 def test_an_amount_the_template_does_not_mark_as_money_is_printed_as_sent():
-    """Only a `{name:money}` hole is minor units: a map whose `amount` counts something else prints
-    it as the number it is, and adds nothing to the money line."""
+    """Only a `{name:money}` hole is money; an unmarked `amount` prints as sent, unsummed."""
     from irimi.servicemaps import MapIndex
 
     stripe = _maps().service_for("api.stripe.com")
@@ -590,8 +576,7 @@ def test_the_closing_lines_say_where_a_delegated_write_went():
 
 
 def test_a_write_whose_target_was_never_reached_is_not_counted_as_delegated():
-    """A write no stub ever saw must not read as a working delegation when the developer's stub
-    was simply not running."""
+    """A write whose target was never reached does not read as sent to the target."""
     lines = summary_lines("7f3a", [_unreachable()], 0.0, _maps())
     assert _host(lines) == "  api.stripe.com  1 write that could not reach the target"
     assert not any("sent to target 127" in line for line in lines)
@@ -661,9 +646,9 @@ def _tool_call(
 
 
 def test_a_delegated_write_s_closing_lines_say_the_tool_writes_did_not_happen_either():
-    """A write tool whose fake ran did not happen either, so it gets a line in the writes block
-    under the same opening claim, after the HTTP writes. A read tool, which ran for real, is no
-    write and changes nothing."""
+    """A write tool whose fake ran gets a line in the writes block, after the HTTP writes.
+
+    A read tool ran for real and gets none."""
     tools = [_tool_call(), _tool_call(kind="read", ran="real", name="db.lookup")]
     delegated = _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund")
     faked = replace(_refund(answered_by="fake-L1"), would_fire=("refund.created",))
@@ -681,11 +666,9 @@ def test_a_delegated_write_s_closing_lines_say_the_tool_writes_did_not_happen_ei
 
 
 def test_stood_in_tool_writes_print_in_the_order_they_ended_whatever_order_they_came_in():
-    """Live, the summary's tool calls come in the order their posts reached the control endpoint,
-    which two tools ending at once on two threads can reverse; a stored run's come in `seq` order,
-    run by run. Each summary printed them as they came, so the two disagreed. They print in
-    the order they ended, a tie broken by the start, then by the id, then by the line itself: a
-    call posted by hand can repeat another's id and times."""
+    """Tool writes print in the order they ended, so the live and stored summaries agree.
+
+    A tie is broken by the start, then the id, then the line: a hand-posted call can repeat both."""
     ended = [
         _tool_call(name="db.first", ended_at=2.0),
         _tool_call(name="db.second", ended_at=3.0),
@@ -714,8 +697,7 @@ def test_a_run_that_only_read_claims_nothing_about_writes():
 
 
 def test_the_write_line_names_the_fidelity_the_answer_actually_had():
-    """A faked write's line says it was faked and whether irimi checked it, whichever body it was
-    answered with: the echo and the fixture read alike, and neither prints an `L` code."""
+    """A faked write's line reads alike for an echo and a fixture, with no `L` code."""
     for answered_by in ("fake-L0", "fake-L1"):
         lines = summary_lines("7f3a", [_refund(answered_by=answered_by)], 0.0, _maps())
         assert "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not checked" in lines
@@ -726,8 +708,7 @@ def test_the_write_line_names_the_fidelity_the_answer_actually_had():
 
 
 def test_a_rejected_write_is_crossed_out_and_names_the_code_it_would_fail_with():
-    """A write L3 rejected is the line the baseline report exists to print: the real service would
-    have refused it. Printed with the `○` marker it read as a write that would have gone through."""
+    """A write the precondition check refused gets `✗` and its code, never the `○` of a success."""
     rows = [
         replace(
             _refund(answered_by="fake-L1", status=400),
@@ -751,8 +732,7 @@ def test_a_passed_write_reads_l3_preconditions_passed():
 
 
 def test_a_write_l3_could_not_evaluate_reads_l2():
-    """Faked, but irimi could not find out whether the service would have taken it, and the run
-    holds no check read to say why."""
+    """A write irimi could not check, with no check read in the run, says it could not check."""
     rows = [replace(_refund(answered_by="fake-L1"), precondition=Precondition("not_evaluable"))]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert (
@@ -762,8 +742,7 @@ def test_a_write_l3_could_not_evaluate_reads_l2():
 
 
 def test_a_write_answered_from_the_recording_says_its_recorded_run_could_not_check_it():
-    """A replay answers a recorded write without making a check read: the recorded run made it,
-    so a check read in the replay's own run belongs to another write and is never borrowed."""
+    """A replayed write never borrows a check read from the replay's own run, which made none."""
     recorded = replace(
         _refund(answered_by="fake-L1", flags=(Flag.FROM_RECORDING,)),
         precondition=Precondition("not_evaluable"),
@@ -791,9 +770,9 @@ def _checked_refund(**kwargs):
 
 
 def test_a_check_read_refused_for_its_credentials_says_so_and_promises_no_webhooks():
-    """The service answered irimi's check read 401 or 403 for the agent's own credentials, so
-    the real write would most likely have been refused too: the line says why it was not checked,
-    and the webhooks it would have fired are not promised."""
+    """A check read answered 401 or 403 says why it could not check, and promises no webhooks.
+
+    The real write would most likely have been refused for the same credentials."""
     for status in (401, 403):
         lines = summary_lines("7f3a", [_check_read(status), _checked_refund()], 0.0, _maps())
         assert _write_block(lines) == [
@@ -840,8 +819,7 @@ def test_a_write_on_a_route_with_no_precondition_keeps_its_own_level():
 
 
 def test_a_delegated_write_l3_could_not_evaluate_still_reads_delegated():
-    """A precondition outcome is a claim about a fake irimi built, and irimi built nothing here -
-    the target did."""
+    """A write sent to a target reads so even when unchecked: the target answered, not irimi."""
     rows = [
         replace(
             _refund(answered_by="delegated", target="http://127.0.0.1:3000/refund"),
@@ -854,8 +832,7 @@ def test_a_delegated_write_l3_could_not_evaluate_still_reads_delegated():
 
 
 def test_an_engine_read_is_counted_apart_from_the_agents_reads_but_still_went_live():
-    """irimi's own precondition read reached the real service, so it is an exchange and it is
-    real; but the agent did not make it, and `N reads` is the agent's number."""
+    """irimi's check read is real but counted apart: `N reads` counts the agent's reads only."""
     rows = [
         _exchange(),
         replace(_exchange(path="/v1/charges/ch_3QabcXYZ"), issued_by="engine"),
@@ -870,8 +847,7 @@ def test_an_engine_read_is_counted_apart_from_the_agents_reads_but_still_went_li
 
 
 def test_the_summary_still_names_a_write_without_the_maps():
-    """`index=None` is the empty-map case, and the write still gets a line: the summary degrades
-    to the request it saw rather than dropping a write it could not name."""
+    """With no maps (`index=None`) a write still gets a line, naming the request it saw."""
     lines = summary_lines("7f3a", [_refund()], 0.0, None)
     assert "  ○ stripe  POST api.stripe.com/v1/refunds  faked; not checked" in lines
 
@@ -1038,9 +1014,7 @@ def test_a_summary_with_no_sdk_runs_keeps_its_plain_header():
 
 
 def test_a_replayed_write_is_counted_once():
-    """The agent retried with the key it already sent and got the first answer back: the same
-    write, so one line and one faked write, or "nine would have been rejected" counts retries
-    instead of intentions. The exchange itself is still counted, as answered by irimi."""
+    """A retry is the same write: one line and one faked write, its exchange answered by irimi."""
     rows = [
         _refund(answered_by="fake-L1", flags=()),
         _refund(answered_by="fake-L1", flags=(Flag.IDEMPOTENT_REPLAY,)),
@@ -1056,8 +1030,7 @@ def test_a_replayed_write_is_counted_once():
 
 
 def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
-    """A key reused for a different write is a write the real service would have refused. L3 was
-    never asked, so it is not `precondition: rejected`, and it still gets the `✗` line."""
+    """A key reused for a different write gets the `✗` line, though no precondition check ran."""
     rows = [
         _refund(answered_by="fake-L1"),
         replace(
@@ -1080,13 +1053,10 @@ def test_an_idempotency_conflict_prints_as_a_write_that_would_fail():
 
 
 def test_a_write_irimi_could_not_decide_prints_as_refused_and_names_why():
-    """irimi answered this refund with its own 502: its body decodes past what irimi reads,
-    so it was recorded with no body and flagged. Rendered through its route's `human:` template it
-    would be described from a body irimi never read. It prints as refused, `✗`, as the request it
-    was, saying why in words. It is still a write that did not happen.
+    """A write refused for its body size prints `✗` as its request line, saying why.
 
-    Its host line counts it as its line names it, `refused by irimi`: counted `unclassified`, the
-    word a route no map names prints, the host line would name a write no line showed."""
+    Its `human:` sentence would describe a body irimi never read. Its host line counts it as
+    `refused by irimi`, as its line names it."""
     cut = _exchange(
         method="POST",
         kind="unknown",
@@ -1118,9 +1088,9 @@ def test_a_write_the_request_hook_refused_says_refused_by_irimi():
 
 
 def test_a_write_whose_decision_raised_prints_its_sentence_as_refused():
-    """A decision that raised read the whole body, so the refusal keeps the map's sentence, and two
-    refunds of different amounts that both raised print, and compare, as different writes:
-    the request line alone would read the same for both."""
+    """A write whose decision raised keeps the map's sentence, which read the whole body.
+
+    So two refunds of different amounts print, and compare, as different writes."""
     raised = _exchange(
         method="POST",
         kind="unknown",
@@ -1149,8 +1119,7 @@ def test_a_write_whose_decision_raised_prints_its_sentence_as_refused():
 def _write_block(lines):
     """The write block as printed: each `○`/`✗` line, with the `↳` lines hanging under it.
 
-    Any line carrying `↳` is kept whatever its indent, so a test that expects none still sees one
-    printed at the wrong depth rather than filtering it out."""
+    Any `↳` line is kept whatever its indent, so one at the wrong depth is still seen."""
     return [line for line in lines if line.startswith(("  ○ ", "  ✗ ")) or "↳" in line]
 
 
@@ -1186,8 +1155,7 @@ UNCHECKED_REFUND = "  ○ stripe  refund $49.00 on ch_3QabcXYZ  faked; not check
 
 
 def test_an_overlaid_read_is_listed_under_the_write_it_saw():
-    """The per-host count said a read showed this run's writes and never said which read, or which
-    write. The reader could not tell whether the agent re-read its own refund."""
+    """An overlaid read is listed under the write it saw."""
     rows = [
         replace(_refund(answered_by="fake-L1"), precondition=Precondition("passed")),
         replace(_exchange(path="/v1/refunds", answered_by="overlay"), overlay="full"),
@@ -1197,8 +1165,7 @@ def test_an_overlaid_read_is_listed_under_the_write_it_saw():
 
 
 def test_a_partial_overlay_hit_says_it_saw_only_part():
-    """`partial` means irimi knowingly showed the agent an incomplete world. Printing it as a plain
-    `saw it` would claim a fidelity the trace itself denies."""
+    """A `partial` overlay says the read saw only part of the run's writes, not a plain `saw it`."""
     rows = [
         _refund(answered_by="fake-L1"),
         replace(_exchange(path="/v1/refunds", answered_by="overlay"), overlay="partial"),
@@ -1211,9 +1178,9 @@ def test_a_partial_overlay_hit_says_it_saw_only_part():
 
 
 def test_a_read_irimi_knew_was_incomplete_says_so_even_though_it_answered_none_of_it():
-    """A Slack read whose channel the two sides spell differently comes back untouched and real,
-    yet irimi knows it did not show the post. Staying silent because the body was not edited
-    would hide the one thing irimi knows about that read."""
+    """A read irimi left untouched but knew was incomplete still says it missed the write.
+
+    A Slack read whose channel the two sides spell differently does not show the post."""
     rows = [_slack_post(), replace(_slack_history(), overlay="partial")]
     lines = summary_lines("7f3a", rows, 0.0, _maps())
     assert _write_block(lines) == [
@@ -1223,9 +1190,7 @@ def test_a_read_irimi_knew_was_incomplete_says_so_even_though_it_answered_none_o
 
 
 def test_a_translated_read_that_needed_no_edit_gets_no_overlay_line():
-    """`overlay: full` on a `live` read means irimi translated the request and the body needed no
-    edit. It is not an overlay hit, and a `↳` line would say the agent saw a write it did not.
-    """
+    """A translated read whose body needed no edit (`overlay: full`, `live`) gets no `↳` line."""
     rows = [
         _refund(answered_by="fake-L1"),
         replace(_exchange(path="/v1/refunds"), overlay="full"),
@@ -1235,9 +1200,7 @@ def test_a_translated_read_that_needed_no_edit_gets_no_overlay_line():
 
 
 def test_an_engine_issued_read_never_gets_an_overlay_line():
-    """The `↳` line says which of the AGENT's reads saw the write. irimi's own precondition read is
-    one the agent never made, so hanging it there would credit the agent with a look it did not
-    take."""
+    """irimi's check read never gets a `↳` line, which lists the agent's reads of the write."""
     rows = [
         replace(_refund(answered_by="fake-L1"), precondition=Precondition("passed")),
         replace(_exchange(path="/v1/charges/ch_3QabcXYZ"), issued_by="engine", overlay="partial"),
@@ -1247,9 +1210,9 @@ def test_an_engine_issued_read_never_gets_an_overlay_line():
 
 
 def test_an_overlaid_read_is_filed_under_its_own_services_write():
-    """The overlay applies only a service's own writes to that service's reads, so a read belongs
-    under the latest write of ITS service, not simply the latest write. Filed by position alone, the
-    Stripe re-read below would sit under the Slack post it never saw."""
+    """An overlaid read is filed under its own service's latest write, not the latest write.
+
+    The overlay applies only a service's own writes to that service's reads."""
     rows = [
         _refund(answered_by="fake-L1"),
         _slack_post(),
@@ -1266,9 +1229,7 @@ def test_an_overlaid_read_is_filed_under_its_own_services_write():
 
 
 def test_an_overlaid_read_is_never_filed_under_a_write_the_overlay_could_not_have_shown():
-    """A refused write is printed, but it never enters the write log, so no read ever saw it. A
-    read after a refund and its refused retry saw the REFUND; filed by position it would hang
-    under the `✗` line and tell the reader the agent was shown a refund that was refused."""
+    """An overlaid read is never filed under a refused write, which never enters the write log."""
     rows = [
         replace(_refund(answered_by="fake-L1"), precondition=Precondition("passed")),
         replace(
@@ -1291,8 +1252,7 @@ def test_an_overlaid_read_is_never_filed_under_a_write_the_overlay_could_not_hav
 
 
 def test_an_engine_read_the_overlay_edited_is_never_counted_as_one_of_the_agents_reads():
-    """The bracket qualifies the agent's `N reads`, so it counts the agent's reads only. An engine
-    read is its own phrase; counted in both, one read would show up twice."""
+    """An overlaid check read is counted once, as irimi's, never in the agent's `N reads`."""
     rows = [
         replace(_refund(answered_by="fake-L1"), precondition=Precondition("passed")),
         replace(
@@ -1306,8 +1266,7 @@ def test_an_engine_read_the_overlay_edited_is_never_counted_as_one_of_the_agents
 
 
 def test_the_closing_line_names_each_event_once_in_first_seen_order():
-    """Two refunds carry two identical tuples; naming `refund.created` twice would promise a webhook
-    per line rather than per event, and a sorted list would lose the order the map gives."""
+    """`would have fired` names each event once, in the order first seen, not sorted."""
     fired = ("refund.created", "charge.refunded")
     rows = [
         replace(_refund(answered_by="fake-L1"), would_fire=fired),
@@ -1319,8 +1278,7 @@ def test_the_closing_line_names_each_event_once_in_first_seen_order():
 
 
 def test_a_run_whose_every_write_was_refused_promises_no_webhooks():
-    """A write the real service would have refused fires nothing. `would have fired: nothing` would
-    be a claim; no line at all is the truth."""
+    """A run whose every write was refused prints no `would have fired` line at all."""
     rows = [
         replace(
             _refund(answered_by="fake-L1", status=400),
@@ -1333,8 +1291,7 @@ def test_a_run_whose_every_write_was_refused_promises_no_webhooks():
 
 
 def test_a_delegated_write_lists_none_of_its_own_but_does_not_hide_the_faked_ones():
-    """A delegated write's `would_fire` is empty by construction, because what the target did is not
-    irimi's to promise. The faked write beside it still owes the reader its events."""
+    """A write sent to a target promises no events; a faked write beside it still lists its own."""
     rows = [
         replace(_refund(answered_by="fake-L1"), would_fire=("refund.created",)),
         _slack_post(answered_by="delegated", target="http://127.0.0.1:3000/slack"),
@@ -1345,8 +1302,7 @@ def test_a_delegated_write_lists_none_of_its_own_but_does_not_hide_the_faked_one
 
 
 def test_a_replayed_write_neither_prints_a_line_nor_promises_its_events_twice():
-    """A replay is the same write answered with the first one's bytes: one line, and its events
-    named once, or the summary counts retries instead of intentions."""
+    """A retry, answered with the first write's bytes, adds no line and names its events once."""
     fired = ("refund.created", "charge.refunded")
     rows = [
         replace(_refund(answered_by="fake-L1", flags=()), would_fire=fired),
@@ -1358,9 +1314,7 @@ def test_a_replayed_write_neither_prints_a_line_nor_promises_its_events_twice():
 
 
 def test_a_write_l3_could_not_check_still_promises_its_events():
-    """`not_evaluable` means irimi could not find out whether the service would have taken the
-    write, not that it would have refused it. The write was faked, so its events are still owed.
-    """
+    """A write irimi could not check still lists its events: `not_evaluable` is no refusal."""
     rows = [
         replace(
             _refund(answered_by="fake-L1"),
@@ -1376,8 +1330,7 @@ def test_a_write_l3_could_not_check_still_promises_its_events():
 
 
 def test_the_summary_s_blocks_come_in_order():
-    """The writes first, under the claim that none happened, with their money and webhooks; then
-    the hosts; then the totals."""
+    """The summary prints the writes, money and webhooks, then the hosts, then the totals."""
     write = replace(_refund(answered_by="fake-L1"), would_fire=("refund.created",))
     lines = summary_lines("7f3a", [_exchange(), write], 0.0, _maps())
     assert lines[1:] == [

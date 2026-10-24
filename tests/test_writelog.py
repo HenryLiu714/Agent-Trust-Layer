@@ -81,8 +81,7 @@ def test_scoped_writes_returns_the_entry_and_the_decoded_writes():
 
 
 def test_a_run_sees_its_own_writes_and_no_other_run_s():
-    """Two runs faking writes into one log: each reads back its own, in order, and a run that has
-    made none gets an empty tuple."""
+    """Each run reads back its own faked writes in order; a run with none gets an empty tuple."""
     log = writelog.WriteLog()
     a1, b1, a2 = (replace(_write(), run_id=run) for run in ("run-a", "run-b", "run-a"))
     for ex in (a1, b1, a2):
@@ -113,8 +112,9 @@ def test_ending_a_run_drops_its_writes_and_no_other_run_s():
 
 
 def test_a_run_s_writes_already_read_do_not_change_when_it_adds_more():
-    """The engine reads a run's writes on its event loop and hands them to a worker thread, so the
-    tuple it got is the log's own and never changes under the worker."""
+    """A tuple of a run's writes never changes after it is read.
+
+    The engine reads it on its event loop and hands it to a worker thread."""
     log = writelog.WriteLog()
     first = _write()
     log.add(first)

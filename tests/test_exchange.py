@@ -61,10 +61,10 @@ def test_an_exchange_came_through_the_proxy_by_default():
 
 
 def test_answered_by_names_every_way_an_exchange_is_answered():
-    """`delegated` is a frozen seam value for an answer from a target, counted apart in the
-    summary. `fake-L1` is the fixture answer, and `fake-L0` stays beside it: L0 is the echo every
-    route without a fixture is still answered with. `irimi` is an error irimi answered with.
-    """
+    """`AnsweredBy` names live, echo, fixture, target, overlay, recording and irimi's own errors.
+
+    `delegated` is the on-disk value for a target's answer; `fake-L0` is the echo and `fake-L1`
+    the fixture."""
     from typing import get_args
 
     from irimi.core.exchange import AnsweredBy
@@ -81,9 +81,7 @@ def test_answered_by_names_every_way_an_exchange_is_answered():
 
 
 def test_fake_level_is_the_locally_answered_subset_of_answered_by():
-    """`services.fake_response` returns a `FakeLevel`, which the Exchange carries as an
-    `AnsweredBy`. Keeping it a subset is what lets the faker name the level without being able to
-    say `live`."""
+    """`FakeLevel` is a subset of `AnsweredBy`, so the faker can name its level but never `live`."""
     from typing import get_args
 
     from irimi.core.exchange import AnsweredBy, FakeLevel
@@ -100,9 +98,7 @@ def test_target_defaults_to_empty_and_records_a_delegated_address():
 
 
 def test_overlay_is_not_a_fake_level():
-    """`FakeLevel` is what `services.fake_response` may return, and the overlay fakes nothing: it
-    edits a real response. Keeping it out is what stops a read from being counted as a faked
-    write by anything that reads the level."""
+    """`overlay` is not a `FakeLevel`: the overlay edits a real response and fakes no write."""
     from typing import get_args
 
     from irimi.core.exchange import FakeLevel

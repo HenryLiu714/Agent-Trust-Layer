@@ -1,6 +1,7 @@
-"""The write log holds only writes that would have happened: no precondition rejection, no
-retry answered from the first try, no idempotency conflict, and no read irimi issued itself.
-Every read the overlay edited sits in the summary under a write the overlay really held."""
+"""The write log holds only writes that would have happened, and irimi issues no write itself.
+
+Every read the overlay edited sits in the summary under a write the overlay really held.
+"""
 
 import http.client
 from dataclasses import replace
@@ -23,8 +24,8 @@ from tests.support.invariants import (
 )
 from tests.support.upstreams import FakeStripe, serve
 
-# The shipped Stripe map's two routes that L3 touches, claimed on loopback: the refund that names
-# `charge_refundable`, and the charge read its precondition probe has to classify as.
+# The shipped Stripe map's two routes the precondition check touches, claimed on loopback: the
+# refund naming `charge_refundable`, and the charge read irimi's check read classifies as.
 STRIPE_MAP = """
 version: 1
 service: stripe
@@ -64,15 +65,14 @@ def _charge(charge_id, refunded):
     }
 
 
-# Real Stripe state for the precondition check: `ch_REAL1` is refundable, `ch_FULL1` is fully
-# refunded.
+# `ch_REAL1` is refundable, `ch_FULL1` fully refunded.
 CHARGES = {"ch_REAL1": _charge("ch_REAL1", 0), "ch_FULL1": _charge("ch_FULL1", 4900)}
 
 
 class _LogCapturingOverlay:
-    """Keeps each write log it was given, and hands every read back untouched - or to `inner`, the
-    real overlay, when there is one. The addon's `write_log` is its own; what an overlay is handed
-    is the only view of it a test should take."""
+    """Keeps each write log it is handed, and passes every read to `inner` or back untouched.
+
+    What an overlay is handed is the view of the write log a test should take."""
 
     def __init__(self, inner: ServiceOverlay | None = None) -> None:
         self.logs: list[tuple[Exchange, ...]] = []
@@ -96,8 +96,7 @@ class _LogCapturingOverlay:
 
 
 def _l3_run(tmp_path, monkeypatch):
-    """A refund L3 passes, one it rejects, then a read, through an engine holding the real
-    reader. Hands back the exchanges and the overlay that watched the write log."""
+    """Run a refund the check passes, one it rejects, then a read; return exchanges and overlay."""
     seen, overlay, replies = _stripe_run(
         tmp_path, monkeypatch, [("ch_REAL1", 100, None), ("ch_FULL1", 100, None)]
     )
@@ -106,10 +105,10 @@ def _l3_run(tmp_path, monkeypatch):
 
 
 def _stripe_run(tmp_path, monkeypatch, refunds, *, real_overlay=False):
-    """Each `(charge, amount, idempotency key or None)` in `refunds` as a refund, then a charge
-    read, through an engine holding the real reader. Hands back the exchanges, the overlay that
-    watched the write log, and every status in order. With `real_overlay` that overlay passes each
-    read on to the real `ServiceOverlay`, which applies the accepted refunds to the closing read."""
+    """Run each `(charge, amount, key or None)` as a refund, then a charge read, with a real reader.
+
+    Returns the exchanges, the watching overlay and every status. With `real_overlay` it passes each
+    read to the real `ServiceOverlay`, which applies the accepted refunds."""
     from irimi.decide.reader import UpstreamReader
 
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "maps-home"))
@@ -160,10 +159,9 @@ def _stripe_run(tmp_path, monkeypatch, refunds, *, real_overlay=False):
 
 
 def test_a_rejected_write_is_never_in_the_write_log(tmp_path, monkeypatch):
-    """L3 said the real service would have refused it, and the agent got that refusal. In the
-    write log it would be replayed onto later reads - an effect for a write that happened in no
-    world. Pinned at the log the overlay is handed, not at one of its downstream effects; a passed
-    refund goes first so the log is not empty for the trivial reason."""
+    """A write the precondition check rejects is never in the log the overlay is handed.
+
+    A passed refund goes first, so the log is not empty for the trivial reason."""
     seen, overlay = _l3_run(tmp_path, monkeypatch)
     assert [ex.precondition.outcome for ex in seen if ex.kind == "write"] == ["passed", "rejected"]
     assert overlay.logs, "the overlay was never handed the write log"
@@ -172,8 +170,7 @@ def test_a_rejected_write_is_never_in_the_write_log(tmp_path, monkeypatch):
 
 
 def test_a_replayed_write_is_never_in_the_write_log_twice(tmp_path, monkeypatch):
-    """The agent's retry with the key it already sent is the same write. A second entry
-    would have the overlay apply one refund twice."""
+    """A retry with the same key is the same write, so it is logged once, not applied twice."""
     seen, overlay, replies = _stripe_run(
         tmp_path, monkeypatch, [("ch_REAL1", 100, "k-1"), ("ch_REAL1", 100, "k-1")]
     )
@@ -187,8 +184,7 @@ def test_a_replayed_write_is_never_in_the_write_log_twice(tmp_path, monkeypatch)
 
 
 def test_an_idempotency_conflict_is_never_in_the_write_log(tmp_path, monkeypatch):
-    """A key reused for a different write was refused, as the real service would refuse it:
-    nothing was minted and there is no effect to replay."""
+    """A key reused for a different write is refused, as the service would, and never logged."""
     seen, overlay, replies = _stripe_run(
         tmp_path, monkeypatch, [("ch_REAL1", 100, "k-2"), ("ch_REAL1", 250, "k-2")]
     )
@@ -202,20 +198,17 @@ def test_an_idempotency_conflict_is_never_in_the_write_log(tmp_path, monkeypatch
 
 
 def test_only_a_write_that_would_have_happened_lists_its_webhooks(tmp_path, monkeypatch):
-    """`would_fire` is a claim about a write irimi accepted, and the write log is the run's own
-    record of which those are. Said once, as the one-directional property: an exchange that
-    lists webhooks is one the overlay was handed as a write. The three that list nothing do so
-    for three different reasons - L3 said the service would have refused it, the service would
-    have refused the reused key, and a replay's events are already on the first write's own
-    exchange."""
+    """An exchange that lists webhooks is one the overlay was handed as a write.
+
+    A rejected write, a key conflict and a retry list none; a retry's are on its first try."""
     seen, overlay, replies = _stripe_run(
         tmp_path,
         monkeypatch,
         [
             ("ch_REAL1", 100, None),  # accepted
-            ("ch_FULL1", 100, None),  # L3 rejection
+            ("ch_FULL1", 100, None),  # precondition rejection
             ("ch_REAL1", 100, "k-1"),  # accepted
-            ("ch_REAL1", 100, "k-1"),  # replay
+            ("ch_REAL1", 100, "k-1"),  # retry
             ("ch_REAL1", 100, "k-2"),  # accepted
             ("ch_REAL1", 250, "k-2"),  # conflict
         ],
@@ -243,8 +236,7 @@ def test_only_a_write_that_would_have_happened_lists_its_webhooks(tmp_path, monk
 
 
 def test_the_write_log_check_passes_a_real_run_and_catches_a_forged_log(tmp_path, monkeypatch):
-    """`write_log_violations` over a run holding every kind of write the log must leave out, and
-    then over logs that break the rule each way it can be broken."""
+    """`write_log_violations` passes a real run's log and catches each way a log can be forged."""
     seen, overlay, replies = _stripe_run(
         tmp_path,
         monkeypatch,
@@ -269,15 +261,11 @@ def test_the_write_log_check_passes_a_real_run_and_catches_a_forged_log(tmp_path
 
 
 def test_every_overlaid_read_has_a_write_of_its_own_service_to_sit_under(tmp_path, monkeypatch):
-    """An overlaid read shows the agent a write that never happened, and the summary's `↳` line
-    is the only place a reader learns which of the agent's reads were shown one. The report
-    files each under the latest earlier write of its own service and quietly skips one it cannot
-    place; that skip is safe only because a real run never produces such a read - the overlay
-    edits or flags a read only on the strength of a same-service write in the log, and every entry
-    there is a printed write. And each is filed under a write the overlay really held: the run's
-    L3 rejection falls between the accepted refund and the read, and a refused write is printed
-    but never logged, so a `↳` under the `✗` would say the agent saw a refund that was refused.
-    Held over a real run through the real overlay."""
+    """Every overlaid read of a real run gets a `↳` line under a write the overlay really held.
+
+    The report skips a read it cannot place, which is safe only because the overlay edits a read
+    only for a logged same-service write. The rejected refund between the accepted one and the read
+    is printed but never logged, so a `↳` under its `✗` would claim the agent saw it."""
     seen, overlay, replies = _stripe_run(
         tmp_path,
         monkeypatch,
@@ -302,9 +290,9 @@ def test_every_overlaid_read_has_a_write_of_its_own_service_to_sit_under(tmp_pat
 
 
 def test_a_replayed_rejection_is_never_in_the_write_log(tmp_path, monkeypatch):
-    """A retry of a write L3 rejected gets the same refusal back, and stays out of the log on
-    both counts: it is a rejection and it is a replay. A passed refund goes first so
-    the log is not empty for the trivial reason."""
+    """A retry of a rejected write gets the same refusal and stays out of the log on both counts.
+
+    A passed refund goes first, so the log is not empty for the trivial reason."""
     seen, overlay, replies = _stripe_run(
         tmp_path,
         monkeypatch,

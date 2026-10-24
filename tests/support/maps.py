@@ -52,8 +52,9 @@ routes:
 
 
 def map_index(tmp_path, monkeypatch, doc=DEMO_MAP):
-    """A MapIndex holding `doc` alone. $IRIMI_HOME is pointed somewhere empty first: the loader
-    merges `$IRIMI_HOME/maps.yaml` when it exists, and a developer may have a real one."""
+    """A MapIndex holding `doc` alone, with `$IRIMI_HOME` pointed somewhere empty first.
+
+    The loader merges `$IRIMI_HOME/maps.yaml` when it exists, and a developer may have one."""
     monkeypatch.setenv(paths.IRIMI_HOME_ENV, str(tmp_path / "maps-home"))
     maps_dir = tmp_path / "maps"
     maps_dir.mkdir(exist_ok=True)
@@ -281,10 +282,10 @@ SHIPPED_MAPS_DIR = Path(irimi.__file__).parent / "maps"
 
 
 def complete_for_check(maps_dir: Path) -> None:
-    """Add to `maps_dir` each service irimi's Python keys on that no test map defines (the
-    shipped file), and to each test map the shipped routes of the operations it leaves out.
+    """Complete `maps_dir` with what the load-time check requires.
 
-    The added routes are ones the test's agent never calls, so they change no answer it gets.
+    A service irimi's Python keys on that no test map defines gets its shipped file, and a test
+    map gets the shipped routes of the operations it leaves out, which its agent never calls.
     """
     shipped: dict[str, tuple[Path, dict]] = {}
     for path in sorted(SHIPPED_MAPS_DIR.glob("*.yaml")):
@@ -313,9 +314,8 @@ def complete_for_check(maps_dir: Path) -> None:
 def index_from(tmp_path, monkeypatch, *docs: str):
     """A MapIndex from `docs`, or from the shipped maps when none are given.
 
-    Both override locations are pointed at empty places: the loader reads `./irimi.maps.yaml` and
-    then `$IRIMI_HOME/maps.yaml`, so a developer with a real overrides file would otherwise see a
-    different index, or a MapError.
+    Both override locations, `./irimi.maps.yaml` and `$IRIMI_HOME/maps.yaml`, point somewhere
+    empty, so a developer's own overrides file changes nothing.
     """
     from irimi import servicemaps
     from irimi.config import paths

@@ -1,8 +1,6 @@
-"""Loopback servers that stand where a real service would.
+"""Loopback servers that stand where a real service would, each with its own log and state.
 
-`serve(Handler, **state)` starts one on a free port and returns its `Port`: the port number, which
-also carries the server's own request log and state, so no two servers, and no two tests, share
-either. `FakeStripe`, `FakeSlack` and `FakeLlm` are configured per server through `state`.
+`serve(Handler, **state)` starts one and returns its `Port`; the fakes are configured by `state`.
 """
 
 import gzip
@@ -22,8 +20,9 @@ from tests.support.servers import stop_server
 
 
 class Port(int):
-    """A loopback server's port. It is the port wherever an int is (`f"http://127.0.0.1:{port}"`),
-    and its attributes are its handler's per-server state: `port.seen` is what this server heard.
+    """A loopback server's port, usable as an int, whose attributes are its server's state.
+
+    `port.seen` is what this server heard.
     """
 
     handler: type[BaseHTTPRequestHandler]
@@ -82,9 +81,10 @@ def serve(
     ssl_context: ssl.SSLContext | None = None,
     **state: Any,
 ) -> Port:
-    """Serve `handler` on a free loopback port until `port.stop()`. The server gets a handler class
-    of its own, holding `handler.per_server()` and then `state`. Threaded when a test needs a
-    request answered while another is still being handled, as irimi's check read is."""
+    """Serve `handler` on a free loopback port until `port.stop()`.
+
+    The server gets a handler class of its own, holding `handler.per_server()` and then `state`.
+    `threaded` answers a request while another is in hand, as irimi's check read needs."""
     fresh = handler.per_server() if issubclass(handler, Logged) else {}
     own = type(handler.__name__, (handler,), {**fresh, **state})
     server = (ThreadingHTTPServer if threaded else HTTPServer)(("127.0.0.1", 0), own)
@@ -120,9 +120,9 @@ def refusing_port() -> int:
 
 
 class Upstream(Logged):
-    """Answers every GET with plain text, and logs `(path, header pairs)`. Pairs, not a dict: a
-    dict keeps one of a repeated name, and "exactly once on the wire" is a claim. A POST is
-    answered 500, since under shadow mode none may arrive."""
+    """Answers every GET with plain text and every POST with 500, logging `(path, header pairs)`.
+
+    Pairs, not a dict, so a test can check a header appears exactly once on the wire."""
 
     def do_GET(self):
         self.seen.append((self.path, self.headers.items()))
@@ -152,8 +152,9 @@ SSE_SECOND = b'data: {"delta": "two"}\n\n'
 
 
 class StreamUpstream(Logged):
-    """Answers with two server-sent events, holding the second until the test sets `port.gate`,
-    so a buffered response cannot reach the client at all inside the client's socket timeout."""
+    """Answers with two server-sent events, holding the second until the test sets `port.gate`.
+
+    So a buffered response cannot reach the client at all within its socket timeout."""
 
     protocol_version = "HTTP/1.1"  # chunked transfer encoding needs HTTP/1.1
     gate: threading.Event
@@ -190,8 +191,7 @@ REAL_GZIP = gzip.compress(b'{"from": "target"}')
 
 
 class TargetStub(Logged):
-    """A developer's own stub, the kind an answer target names: it logs `(method, path, body,
-    headers)` and answers its own JSON."""
+    """A developer's stub a target names; logs `(method, path, body, headers)`, answers JSON."""
 
     def _handle(self):
         self.seen.append((self.command, self.path, self.body(), dict(self.headers)))
@@ -323,9 +323,10 @@ class FakeStripe(Logged):
 
 
 class FakeSlack(Logged):
-    """A loopback Slack. `methods` maps each Web API path it answers to a function of the posted
-    JSON that returns the document, sent at 200 as Slack sends it. Any other POST is answered 500:
-    a `chat.postMessage` arriving here is a faked post that escaped. `seen` logs `(method, path)`.
+    """A loopback Slack; `seen` logs `(method, path)`.
+
+    `methods` maps each Web API path it answers to a function of the posted JSON returning the
+    document, sent at 200. Any other POST, such as an escaped `chat.postMessage`, gets 500.
     """
 
     methods: dict[str, Callable[[dict[str, Any]], object]] = {}
@@ -344,9 +345,10 @@ class FakeSlack(Logged):
 
 
 class FakeLlm(Logged):
-    """A loopback model. `reply(handler, document)` returns each answer's `(status, document)`; a
-    document asking to stream gets `stream(handler, document)`'s parts as server-sent events
-    instead, when `stream` is set. `seen` logs every posted document."""
+    """A loopback model; `seen` logs every posted document.
+
+    `reply(handler, document)` returns `(status, document)`. When `stream` is set, a request to
+    stream gets `stream(handler, document)`'s parts as server-sent events instead."""
 
     reply: Callable[..., tuple[int, object]]
     stream: Callable[..., list[object]] | None = None
@@ -386,9 +388,10 @@ def stripe_charge(charge_id, amount_refunded=0):
 
 
 def precondition_stripe() -> dict[str, Any]:
-    """The real Stripe as irimi's precondition check sees it: one refundable charge, one fully
-    refunded, one slow to answer, one rate-limited and one that redirects to the fully refunded
-    one. `serve(FakeStripe, threaded=True, **precondition_stripe())`."""
+    """Stripe as irimi's precondition check sees it, for `serve(FakeStripe, threaded=True, ...)`.
+
+    One charge is refundable, one fully refunded, one slow, one rate-limited, and one redirects
+    to the fully refunded one."""
     return {
         "charges": {
             "ch_REAL1": stripe_charge("ch_REAL1"),
@@ -421,8 +424,7 @@ REPLAY_CHARGE = {
 
 
 def replay_stripe() -> dict[str, Any]:
-    """A Stripe that answers a charge, hangs up on `ch_RESET`, and refuses every id it never
-    minted. `serve(FakeStripe, threaded=True, **replay_stripe())`."""
+    """A Stripe answering one charge, hanging up on `ch_RESET`, refusing any id it never minted."""
     return {
         "charges": {"ch_REAL1": REPLAY_CHARGE},
         "documents": {"/v1/refunds": stripe_list()},
@@ -444,8 +446,7 @@ def _replay_stream(handler, document):
 
 
 def replay_llm() -> dict[str, Any]:
-    """A model answering with its system prompt and a counter, three server-sent events when asked
-    to stream. `serve(FakeLlm, threaded=True, **replay_llm())`."""
+    """A model answering with its system prompt and a counter, as three events when streaming."""
     return {"reply": _replay_reply, "stream": _replay_stream}
 
 

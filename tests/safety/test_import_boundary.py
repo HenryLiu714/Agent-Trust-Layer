@@ -1,22 +1,6 @@
-"""The import boundaries the package layout promises (docs/architecture.md, "Layers").
+"""The import boundaries the package layout promises (`docs/architecture.md`, "Layers").
 
-Both rules are mechanical, so a refactor cannot quietly undo them:
-
-  1. mitmproxy is imported in exactly one module, `irimi.engine.mitm`. Everything else talks to
-     the `Engine` protocol, which is what lets the decision, the store and the reports be tested
-     without a proxy and lets the engine be swapped.
-  2. A module imports only from below it. `LAYERS` lists irimi's packages lowest first, a layer
-     holding one package or several side by side, and each package its modules lowest first. A
-     module may import any module of an earlier layer, and a module listed before it in its own
-     package; never a later one, nor another package of its own layer. A package nested in
-     another (`services/stripe/`) is one entry of its parent, its modules importing each other
-     freely. An import made only for type checking may name a later module of its own package,
-     since it runs nothing. `cli` may import everything else, which is what makes it the
-     composition root; only `__main__`, `python -m irimi`, and the public `irimi.testing` sit
-     above it.
-
-docs/architecture.md's layer table places the same packages in the same layers, and a test below
-holds it to `LAYERS`, so the two cannot drift.
+mitmproxy is imported only in `irimi.engine.mitm`, and a module imports only from below it.
 """
 
 import ast
@@ -29,8 +13,9 @@ SRC = ROOT / "src" / "irimi"
 DOCS = ROOT / "docs" / "architecture.md"
 MITM_ALLOWED = {SRC / "engine" / "mitm.py"}
 
-# Each layer maps its packages to their modules, lowest first; a top-level module that is not a
-# package has no module list (None).
+# Each layer maps its packages to their modules, lowest first (None for a plain module). A module
+# imports earlier layers and earlier modules of its package, a later one only under TYPE_CHECKING;
+# a nested package (`services/stripe/`) is one entry.
 LAYERS: list[dict[str, list[str] | None]] = [
     # vocabulary
     {
@@ -131,8 +116,7 @@ Entry = tuple[str, str | None]
 
 
 def _entry(dotted: str) -> Entry | None:
-    """The entry an `irimi.<package>[.<module>[...]]` name falls in, or None for `irimi` itself
-    (`__version__`), which imports nothing from irimi."""
+    """The entry an `irimi.<package>[.<module>[...]]` name falls in, or None for `irimi` itself."""
     parts = dotted.split(".")
     if len(parts) < 2:
         return None
@@ -142,8 +126,7 @@ def _entry(dotted: str) -> Entry | None:
 
 
 def _from_entries(module: str, names: list[str]) -> set[Entry]:
-    """What `from <module> import <names>` imports: a name that is a module of the package
-    `module` names is that module, and any other name comes from `module` itself."""
+    """The entries `from <module> import <names>` imports, a submodule's name counting as itself."""
     here = _entry(module)
     out: set[Entry] = set()
     for name in names:
@@ -169,8 +152,7 @@ def _typing_only(tree: ast.AST) -> set[ast.AST]:
 
 
 def _irimi_imports(py: Path) -> set[tuple[Entry, bool]]:
-    """Every irimi entry `py` imports, at any depth, deferred imports included, each with whether
-    it is imported only for type checking."""
+    """Every irimi entry `py` imports at any depth, and whether only for type checking."""
     tree = ast.parse(py.read_text())
     typing_only = _typing_only(tree)
     out: set[tuple[Entry, bool]] = set()
@@ -200,8 +182,7 @@ def _entry_of(py: Path) -> Entry | None:
 
 
 def _mitmproxy_imports(py: Path) -> list[str]:
-    """Every import of mitmproxy in `py`: an `import` or `from` of it, or an `import_module` or
-    `__import__` call with its name as a literal."""
+    """Every import of mitmproxy in `py`, including `import_module` and `__import__` calls."""
     found = []
     for node in ast.walk(ast.parse(py.read_text())):
         names: list[str] = []
@@ -287,8 +268,7 @@ TESTS = ROOT / "tests"
 
 
 def _test_module_imports(py: Path) -> list[str]:
-    """Every test module `py` imports: a `tests...test_*` module, or `test_*` from a `tests`
-    package."""
+    """Every `tests...test_*` module `py` imports."""
     found = []
     for node in ast.walk(ast.parse(py.read_text(), filename=str(py))):
         if isinstance(node, ast.Import):
@@ -306,8 +286,7 @@ def _test_module_imports(py: Path) -> list[str]:
 
 
 def test_no_test_module_imports_another():
-    """A helper two test modules share lives in `tests/support/`, which is not collected, so
-    splitting or renaming one test file never breaks another."""
+    """No test module imports another; shared helpers live in `tests/support/`, never collected."""
     offenders = [
         f"{py.relative_to(ROOT)} imports {name}"
         for py in sorted(TESTS.rglob("*.py"))

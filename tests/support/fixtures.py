@@ -42,8 +42,7 @@ def engine(tmp_path, monkeypatch):
 
 @pytest.fixture
 def target():
-    """A `TargetStub` an answer target can name; `target.stop()` frees its port mid-test, so the
-    next connection to it is refused."""
+    """A `TargetStub` a target can name; after `target.stop()` a connection to it is refused."""
     port = serve(TargetStub)
     yield port
     port.stop()
@@ -51,8 +50,9 @@ def target():
 
 @pytest.fixture
 def precondition_stub(tmp_path, monkeypatch):
-    """The stub, and an engine over PRECONDITION_STRIPE_MAP built the way the CLI builds one: the
-    real overlay and a policy holding the real reader. Yields (proxy port, stub port, exchanges)."""
+    """Yield `(proxy port, stub port, exchanges)` for an engine built as the CLI builds one.
+
+    It serves PRECONDITION_STRIPE_MAP with the real overlay and a policy holding the real reader."""
     from irimi.decide.overlay import ServiceOverlay
     from irimi.decide.reader import UpstreamReader
 
@@ -70,8 +70,7 @@ def precondition_stub(tmp_path, monkeypatch):
 
 @pytest.fixture
 def stripe_stand_in():
-    """The base-URL refund's Stripe. Threaded: irimi's own precondition read runs on a worker
-    thread, and a single-threaded stand-in would serialize it against the agent's traffic."""
+    """The base-URL refund's fake Stripe, threaded so irimi's check read runs beside the agent's."""
     port = serve(FakeStripe, threaded=True, **base_url_stripe())
     yield port
     port.stop()
@@ -87,8 +86,9 @@ def home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def home_with_maps(tmp_path, monkeypatch):
-    """`home_with_maps({"stripe.yaml": text, ...})`: those maps in place of the shipped ones,
-    completed with what the load-time check requires. Returns the maps directory."""
+    """`home_with_maps({"stripe.yaml": text, ...})` puts those maps in place of the shipped ones.
+
+    The maps are completed with what the load-time check requires; it returns the maps directory."""
 
     def install(maps: dict[str, str]):
         maps_dir = tmp_path / "maps"

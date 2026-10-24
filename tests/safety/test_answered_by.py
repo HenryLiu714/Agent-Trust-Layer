@@ -1,5 +1,7 @@
-"""Every answer irimi decided carries `Irimi-Answered-By`, its own errors included, and no live
-forward does; an exchange sent to a target never reached the host the agent addressed."""
+"""The answered-by header: every answer irimi decided carries it, and no live forward does.
+
+An exchange sent to a target never reaches the host the agent addressed.
+"""
 
 import http.client
 import json
@@ -45,7 +47,7 @@ routes:
 
 
 class _Recorder(Logged):
-    """An upstream that writes down every request it is given. The target rule reads that list."""
+    """An upstream that logs every request it is given, for the target checks to read."""
 
     def _answer(self):
         self.seen.append((self.command, self.path))
@@ -113,9 +115,9 @@ def _maps(tmp_path, monkeypatch, targets=()):
 def test_a_real_run_answers_every_way_and_breaks_no_invariant(
     tmp_path, monkeypatch, upstream, stub
 ):
-    """One live read, one locally answered write and one delegated write, in one run. The point of
-    driving a real engine is that the exchanges are the ones the product built, not ones a test
-    arranged to pass its own check."""
+    """A live read, a faked write and a write sent to a target, in one real run, all stamped right.
+
+    A real engine builds the exchanges, so no test arranged them to pass its own check."""
     maps = _maps(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{stub}/w")]
     )
@@ -130,12 +132,10 @@ def test_a_real_run_answers_every_way_and_breaks_no_invariant(
     seen, replies = run_engine(tmp_path, monkeypatch, maps, calls)
     assert sorted(ex.answered_by for ex in seen) == ["delegated", "fake-L0", "live"]
     assert stamping_violations(seen) == []
-    # The live read reached the real upstream and neither of the other two did, which is the half
-    # of the stamping rule that no pure function can see, and is the target rule for the delegated
-    # one.
+    # Only the live read reached the upstream: the half of the rule no pure function can see.
     assert upstream.seen == [("GET", "/hello")]
     assert reached_upstream_violations(seen, upstream.seen) == []
-    # And on the wire, which is where it matters: the header the client actually received.
+    # The header the client received on the wire.
     assert [stamped for _, _, stamped in replies] == [None, "delegated", "fake-L0"]
 
 
@@ -158,10 +158,10 @@ def test_the_locally_answered_write_is_stamped_and_the_live_read_is_not(
 def test_a_replay_stamps_what_it_answered_and_leaves_a_live_forward_bare(
     tmp_path, monkeypatch, upstream
 ):
-    """Stamping in a replay: a read answered from the recording carries `recording`, the write
-    answered with its recorded answer carries its recorded level, and the read the recording had
-    no second answer for goes live and carries nothing. Nothing in these requests is a secret, so
-    the recording is the run's own exchanges, as the store would have written them."""
+    """A replay stamps recorded answers with `recording` or their level, and a live forward bare.
+
+    The read the recording has no second answer for goes live. Nothing here is a secret, so the
+    recording is the run's own exchanges."""
     maps = _maps(tmp_path, monkeypatch)
 
     def calls(port):
@@ -190,11 +190,10 @@ def test_a_replay_stamps_what_it_answered_and_leaves_a_live_forward_bare(
 
 
 def test_the_answer_a_failed_decision_gives_is_stamped_too(tmp_path, monkeypatch, upstream):
-    """A path that never sets a `Plan`, and so never reaches `response()`. A 502 sent with no
-    header would read as the real service's answer to a client using the header to tell the two
-    apart. `stamping_violations` cannot see that, because it calls `stamp` on the recorded
-    Exchange and reads the header that call *would* produce - so this test asserts on `stamped`,
-    the header the client actually received.
+    """A failed decision's 502 is stamped `irimi` on the wire, not only in the trace.
+
+    `stamping_violations` stamps the recorded exchange itself, so this asserts on the header the
+    client received.
     """
 
     class _BrokenPolicy:
@@ -253,10 +252,9 @@ def _boom(*args, **kwargs):
 def test_irimis_own_errors_are_stamped_json_and_recorded(
     tmp_path, monkeypatch, upstream, case, status, flag
 ):
-    """Stamping for every error irimi answers with itself: the request hook's refusals and a target
-    it cannot reach. Each carries `Irimi-Answered-By: irimi` on the wire, has the one JSON error
-    shape, and is in the trace flagged with why. One that skipped any of the three would read as
-    the real service's answer, or be missing from the summary."""
+    """Each of irimi's own errors is stamped `irimi`, has the JSON error shape and is recorded.
+
+    That covers the request hook's refusals and an unreachable target, each flagged with why."""
     targets = []
     if case == "target-unreachable":
         targets = [("127.0.0.1", "/things", f"http://127.0.0.1:{_closed_port()}/w")]
@@ -285,10 +283,9 @@ def test_irimis_own_errors_are_stamped_json_and_recorded(
 
 
 def test_a_policy_that_answers_locally_without_saying_so_is_caught(tmp_path, monkeypatch, upstream):
-    """The deliberately broken fourth policy. It synthesizes an answer and stamps it `live`, so
-    the agent's write never leaves the machine while the exchange claims the real service did it.
-    The engine records `live`, `stamp` therefore adds no header, and the upstream saw nothing -
-    the three facts the stamping rule exists to make contradictory."""
+    """A policy that fakes a write but labels it `live` is caught by what the upstream saw.
+
+    The exchange says `live` and carries no header, yet the upstream heard nothing."""
 
     class _LiarPolicy:
         name = "liar"
@@ -346,15 +343,13 @@ def test_every_answer_shadow_policy_gives_is_stamped_for_who_gave_it(tmp_path, m
     assert stamping_violations(stamped) == []
 
 
-# ------------------------------------------ a target's answer never reached the addressed host
+# ------------------------------------------ a target's answer never reaches the addressed host
 
 
 def test_a_delegated_exchange_never_reaches_the_host_the_agent_addressed(
     tmp_path, monkeypatch, upstream, stub
 ):
-    """The agent addressed the upstream; the target answered. The upstream must have no
-    record of it at all - a delegated write that also reached production is the failure this
-    whole feature exists to prevent."""
+    """A write sent to a target leaves no trace on the host the agent addressed."""
     maps = _maps(
         tmp_path, monkeypatch, targets=[("127.0.0.1", "/things", f"http://127.0.0.1:{stub}/w")]
     )
@@ -380,9 +375,9 @@ def stream_stub():
 
 
 def test_a_streamed_delegated_answer_is_stamped_too(tmp_path, monkeypatch, upstream, stream_stub):
-    """`stamp` cannot stamp this one: mitmproxy has already sent the headers by the time the
-    `response` hook runs, so the rebuilt response never reaches the client. Deleting the stamp in
-    `responseheaders` leaves this the only test that goes red."""
+    """A target's streamed answer is stamped, which only `responseheaders` can do.
+
+    mitmproxy sends a streamed response's headers before the `response` hook runs."""
     maps = _maps(
         tmp_path,
         monkeypatch,

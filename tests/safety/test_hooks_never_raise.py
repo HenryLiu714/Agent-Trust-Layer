@@ -1,4 +1,4 @@
-"""No addon hook raises: a raise forwards the flow, so a write would escape shadow mode."""
+"""The fail-closed hook rule: no addon hook raises, since a raise forwards the flow live."""
 
 import asyncio
 import itertools
@@ -22,12 +22,9 @@ from tests.support.maps import targeted_index
 def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
     tmp_path, monkeypatch, upstream, refused_port
 ):
-    """The never-raise rule, as a whole rather than per call site.
+    """A raise anywhere in the decision answers irimi's 502 and records the write.
 
-    A hook that raises makes mitmproxy forward the flow untouched, so an exception anywhere in
-    the classify/answer decision sends the agent's write to the real service - and no `Plan` is
-    set, so `response()` returns early and no Exchange is recorded either. The write is
-    performed for real and is invisible in the trace.
+    Raised out of the hook, it would send the write to the real service with nothing recorded.
     """
     maps = targeted_index(
         tmp_path,
@@ -46,7 +43,7 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
         )
     finally:
         stop()
-    # The upstream's do_POST answers 500 and exists to prove it was never reached.
+    # The upstream answers a POST with 500, so a 502 shows it was never reached.
     assert status == 502, "the write reached the real upstream"
     assert json.loads(data)["error"]["type"] == "irimi_decision_failed"
     assert len(seen) == 1, "the exchange must still be recorded"
@@ -55,11 +52,10 @@ def test_a_raise_in_the_decision_answers_locally_instead_of_forwarding(
 
 
 def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monkeypatch):
-    """The hook awaits `asyncio.to_thread`, and the hand-off can fail on its own - an
-    executor already shut down under a stopping proxy - before `plan`'s guard is ever reached.
-    It takes the same 502 as a decision that raised: the request may be a write. It is timed like
-    any other exchange, from the request hook's first line to the answer: the engine's clock
-    is a counter here, so an `ended_at` the 502 path forgot would read 100.0, not 101.0."""
+    """A failed hand-off to the worker thread gets a decision failure's 502, timed as usual.
+
+    The executor can be shut down under a stopping proxy before `plan`'s guard is reached. The
+    clock is a counter here, so an `ended_at` the 502 path forgot reads 100.0, not 101.0."""
     seen: list[Exchange] = []
     addon = bare_addon(tmp_path, monkeypatch, on_exchange=seen.append)
 
@@ -82,9 +78,9 @@ def test_a_raise_handing_the_decision_to_a_worker_answers_locally(tmp_path, monk
 
 
 def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monkeypatch):
-    """`_carry_translation` runs back on the loop, outside `plan`'s guard, but under the
-    decision's backstop all the same, so a raise there cannot escape the hook and forward a
-    half-edited read with nothing recorded."""
+    """A raise carrying a translation onto the flow answers 502 instead of forwarding the read.
+
+    `_carry_translation` runs on the loop, outside `plan`'s guard, but under the hook's own."""
     from dataclasses import replace
 
     class _Translating:
@@ -116,9 +112,10 @@ def test_a_raise_carrying_a_rewrite_onto_the_flow_answers_locally(tmp_path, monk
 
 
 def test_a_raise_recording_an_engine_read_leaves_the_write_answered(tmp_path, monkeypatch):
-    """`Decided.issued` is recorded last, after the write's own answer is on the flow. A store
-    or `on_exchange` that raises there escapes the hook, and mitmproxy forwards a flow only when
-    it has no response - so the write is still answered locally and still pending its record."""
+    """A raise recording irimi's check read leaves the faked write answered and pending its record.
+
+    `Decided.issued` is recorded after the answer is on the flow, and mitmproxy forwards a flow
+    only when it has no response."""
     from irimi.engine.mitm import META_KEY
 
     probe = Request(
@@ -289,7 +286,6 @@ def _tls_failure_with_raising_callback(tmp_path, monkeypatch, seen):
     ids=lambda case: case.__name__.lstrip("_"),
 )
 def test_no_hook_raises_when_a_collaborator_does(case, tmp_path, monkeypatch):
-    """Each hook the addon has a collaborator in, with that collaborator raising: the hook
-    returns, a write is answered by irimi and never forwarded, and what happened is recorded."""
+    """A hook whose collaborator raises returns, and a write is answered by irimi, not forwarded."""
     seen: list[Exchange] = []
     case(tmp_path, monkeypatch, seen)

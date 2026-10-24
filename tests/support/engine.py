@@ -1,5 +1,7 @@
-"""Running irimi for a test, and talking to it: a real `MitmEngine` on a loopback port, `irimi`
-as a process of its own, and this process set up as an agent the SDK reports from."""
+"""Run irimi for a test and talk to it: a real `MitmEngine` on loopback, `irimi` as a process.
+
+Also sets this process up as an agent the SDK reports from.
+"""
 
 import asyncio
 import contextlib
@@ -79,8 +81,7 @@ def start_engine(
     on_tool_call=None,
     on_tls_failure=None,
 ):
-    """Serve `cfg` on a background loop until the returned stop() is called, which closes
-    `store` once the engine has stopped."""
+    """Serve `cfg` on a background loop until the returned `stop()`, which then closes `store`."""
     seen: list[Exchange] = []
     policy = policy or ShadowPolicy()
     store = store or NullStore()
@@ -105,9 +106,8 @@ def start_engine(
     t.start()
     asyncio.run_coroutine_threadsafe(eng.wait_ready(), loop).result(timeout=15)
     if trust_upstream_ca is not None:
-        # Test-only. mitmproxy verifies upstream TLS against certifi's bundle; the TLS upstream in
-        # these tests presents a leaf signed by the irimi CA, so trust that instead. This reaches
-        # into the engine on purpose; there is no product option for it.
+        # mitmproxy verifies upstream TLS against certifi's bundle, and the TLS upstream here
+        # presents a leaf signed by the irimi CA. No product option trusts it, so reach in.
         async def trust() -> None:  # on the engine's loop, like every other options change
             assert eng._master is not None
             eng._master.options.update(ssl_verify_upstream_trusted_ca=str(trust_upstream_ca))
@@ -245,8 +245,9 @@ def bare_flow(method, path):
 
 
 def read_via_proxy(proxy_port, url, extra_headers=None, method="GET", body=None):
-    """A read through the proxy that returns the response headers too: the stamp is on the wire
-    only, never on the recorded exchange. A GET unless told otherwise: Slack reads are POSTs."""
+    """A read through the proxy, returning `(status, headers, data)`; a GET unless `method` says.
+
+    The headers matter because the answered-by header is on the wire only, never recorded."""
     conn = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
     headers = {"host": url.split("/")[2]}
     headers.update(extra_headers or {})
@@ -289,10 +290,10 @@ def writes_in(seen):
 
 
 def stream_server(chunks, gates=(), reset=False, extra_headers=(), tls_leaf=None):
-    """A loopback SSE upstream that sends `chunks` with chunked transfer encoding, as OpenAI and
-    Anthropic do, then ends the body, or with `reset` resets the connection instead. It waits for
-    `gates[i]` before whatever follows chunk `i`, and serves TLS with `tls_leaf`, a PEM of a leaf
-    and its key. The caller shuts it down."""
+    """A loopback SSE upstream that sends `chunks` chunked, as OpenAI and Anthropic do.
+
+    It waits for `gates[i]` before whatever follows chunk `i`, then ends the body, or with `reset`
+    resets the connection. `tls_leaf` (a leaf-and-key PEM) turns on TLS. The caller stops it."""
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -383,10 +384,10 @@ def carries_run_header(headers) -> bool:
 
 
 class Served:
-    """`irimi <argv>` as its own process, on a free port, with this test's `$IRIMI_HOME`. Its
-    stdout is read line by line on a thread, so a test waits for a line with a deadline rather
-    than blocking on a pipe, and its stderr goes to a file. `launcher` is what Python runs irimi
-    as: its own module, or a `-c` bootstrap that calls `irimi.cli.main`."""
+    """`irimi <argv>` as its own process, on a free port, with this test's `$IRIMI_HOME`.
+
+    Its stdout is read on a thread, so a test waits for a line with a deadline; stderr goes to a
+    file. `launcher` is how Python runs irimi: `-m irimi`, or a `-c` bootstrap calling `main`."""
 
     def __init__(self, home, *argv: str, launcher: tuple[str, ...] = ("-m", "irimi")) -> None:
         import os
@@ -448,9 +449,10 @@ def port_of(banner: list[str]) -> int:
 
 
 def serve_blocks(lines: list[str], reader) -> list[str]:
-    """The run ids of the `--- run <id> ---` blocks in `lines`, each checked to be followed at once
-    by the summary of that run as the store holds it now: printed under one lock, a
-    block is never split by another line."""
+    """The run ids of the `--- run <id> ---` blocks in `lines`, each checked whole.
+
+    Each block is followed at once by that run's stored summary: serve prints a block under one
+    lock, so no other line splits it."""
     from irimi.report.model import RunView
     from irimi.report.summary import summary_lines
 
@@ -491,9 +493,10 @@ class RunningIrimi:
 
 @contextlib.contextmanager
 def running_irimi(cfg, tmp_path, monkeypatch, **start) -> Iterator[RunningIrimi]:
-    """`cfg` served by a real engine with a real store, and this process set up as `irimi shadow`
-    sets up its child: active, and reporting to the engine's control endpoint through a fresh
-    client, so no warning a test expects was already given by another."""
+    """Serve `cfg` with a real store, with this process set up as `irimi shadow` sets up its child.
+
+    The SDK is active and reports through a fresh client, so no test's expected warning was already
+    given by another."""
     store = DirectoryStore(tmp_path / "store", redact.load_key(tmp_path))
     eng, seen, stop = start_engine(cfg, store=store, **start)
     stopped = False
@@ -534,8 +537,9 @@ def python_child(source: str = "pass") -> list[str]:
 
 
 def spy_on_the_store(monkeypatch, close=None):
-    """Swap the class `compose._open_store` builds for a real `DirectoryStore` that remembers each
-    `close()` and the thread it came from, and may do `close(store)` after the real one."""
+    """Swap the store class `compose` builds for a `DirectoryStore` that logs each `close()`.
+
+    It records the closing thread's name, then calls `close(store)` if given."""
     import threading
 
     from irimi.record.store.writer import DirectoryStore
@@ -554,8 +558,7 @@ def spy_on_the_store(monkeypatch, close=None):
 
 
 class ReaderGoneWhen(io.StringIO):
-    """stdout, whose reader goes away once `gone` is set: every later write fails as a closed
-    pipe's does."""
+    """A stdout whose reader goes away once `gone` is set: later writes fail as a closed pipe's."""
 
     gone = False
 

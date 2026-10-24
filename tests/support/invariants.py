@@ -1,5 +1,7 @@
-"""Checkers for the rules irimi holds on every run. Each returns what breaks a rule, one
-string per break, so a test asserts it empty on an honest run and non-empty on a forged one."""
+"""Checkers for the rules irimi holds on every run, each returning one string per break.
+
+A test asserts a checker empty on an honest run and non-empty on a forged one.
+"""
 
 from collections.abc import Sequence
 
@@ -18,8 +20,7 @@ def answered_by_of(response: Response | None) -> str | None:
 
 
 def stamping_violations(exchanges: Sequence[Exchange]) -> list[str]:
-    """Every answer in `exchanges` whose `Irimi-Answered-By` is missing, present on a live
-    forward, or names someone other than who answered, one per line."""
+    """Every answer whose `Irimi-Answered-By` is missing, on a live forward, or names another."""
     out: list[str] = []
     for ex in exchanges:
         where = f"{ex.answered_by} {ex.kind} {ex.request.method} {ex.request.path}"
@@ -41,12 +42,10 @@ def stamping_violations(exchanges: Sequence[Exchange]) -> list[str]:
 def reached_upstream_violations(
     exchanges: Sequence[Exchange], upstream_hits: Sequence[tuple[str, str]]
 ) -> list[str]:
-    """Invariant (a)'s other half, which only an end-to-end run can check: a `live` exchange
-    reached the real service, and an engine-answered one did not.
+    """Every `live` exchange the upstream never saw, and every answered-by-irimi one it did see.
 
-    `stamp` cannot catch a policy that answers locally and stamps `live` - the stamp is the only
-    thing it has to go on, and a liar's stamp says `live`. What the upstream actually received is
-    the fact outside the policy's reach, so the check is written against it.
+    This is the answered-by header's other half: a policy that answers locally and stamps `live`
+    passes `stamping_violations`, so the check is made against what the upstream received.
     """
     out: list[str] = []
     hits = list(upstream_hits)
@@ -62,10 +61,10 @@ def reached_upstream_violations(
 
 
 def owes_overlay_line(ex: Exchange) -> bool:
-    """One of the agent's own reads that irimi edited to show a write, or knows it showed only in
-    part. This deliberately restates the rule `report.model.disposition` applies rather than
-    calling it: the invariant is what the summary OWES, so a model that stopped owing a line
-    must fail here instead of agreeing with itself."""
+    """Whether `ex` is an agent read irimi overlaid, wholly or in part, so the summary owes a line.
+
+    It restates `report.model.disposition`'s rule rather than calling it, so a model that stops
+    owing the line fails here instead of agreeing with itself."""
     return (
         ex.kind == "read"
         and ex.issued_by == "agent"
@@ -83,11 +82,10 @@ def filed_reads(exchanges: Sequence[Exchange]) -> list[tuple[Exchange, list[Exch
 def overlay_line_violations(
     exchanges: Sequence[Exchange], write_log: Sequence[Exchange]
 ) -> list[str]:
-    """Every one of the agent's reads the summary owes a `↳` line but files under no write, or
-    under a write the overlay was never handed, named one per line. `write_log` is every write the
-    overlay held during the run: a read cannot have been shown a write outside it, so a `↳` under
-    one - a refused retry, say - tells the reader the agent saw what it never saw. Matched by
-    identity, not equality: a copy of a filed read is a different read."""
+    """Every agent read owed a `↳` line but filed under no write, or under one the overlay lacked.
+
+    `write_log` is every write the overlay held. A `↳` under any other write (a refused retry,
+    say) claims the agent saw what it never saw. Reads match by identity, not equality."""
     filed = [(write, read) for write, reads in filed_reads(exchanges) for read in reads]
     violations = []
     for ex in exchanges:
@@ -103,9 +101,9 @@ def overlay_line_violations(
 
 
 def engine_issued_violations(exchanges: Sequence[Exchange]) -> list[str]:
-    """Every exchange irimi issued on its own account that is not a read, named one per line.
-    A precondition read that were anything else would be irimi performing a write nobody asked
-    for, in a tool whose promise is that writes are virtual."""
+    """Every exchange irimi issued on its own account that is not a read.
+
+    A check read that were anything else would be irimi making a write nobody asked for."""
     return [
         f"check read: engine-issued {ex.kind}: {ex.request.method} {ex.request.path}"
         for ex in exchanges
@@ -114,10 +112,10 @@ def engine_issued_violations(exchanges: Sequence[Exchange]) -> list[str]:
 
 
 def write_log_violations(exchanges: Sequence[Exchange], log: Sequence[Exchange]) -> list[str]:
-    """Every way `log`, the writes the overlay was handed, disagrees with the run's `exchanges`:
-    an entry that is not a write that would have happened (a read, a precondition rejection, a
-    retry answered from its first try, an idempotency conflict, an entry twice), or a write that
-    lists webhooks yet is not in the log. Matched by identity, as the log holds the run's own."""
+    """Every way `log`, the writes the overlay was handed, disagrees with the run's `exchanges`.
+
+    An entry must be a write that would have happened: not a read, a rejected write, a retry, an
+    idempotency conflict or a repeat. A write listing webhooks must be in the log. By identity."""
     out = []
     for at, ex in enumerate(log):
         what = f"{ex.kind} {ex.request.method} {ex.request.path}"

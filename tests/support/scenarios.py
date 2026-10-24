@@ -1,5 +1,7 @@
-"""The refund scenario the end-to-end tests share: a loopback Stripe with one refundable
-charge, and a child that refunds it through `irimi shadow`."""
+"""The refund scenario the end-to-end tests share.
+
+A loopback Stripe with one refundable charge, and a child that refunds it through `irimi shadow`.
+"""
 
 import functools
 import importlib.util
@@ -28,8 +30,9 @@ DEMO_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "demo.py"
 
 @functools.cache
 def demo() -> ModuleType:
-    """`scripts/demo.py`, loaded by its path: `scripts/` is not a package. Its `run(example,
-    workdir)` runs an example under `irimi shadow` against the fake internet."""
+    """`scripts/demo.py`, loaded by its path, since `scripts/` is not a package.
+
+    Its `run(example, workdir)` runs an example under `irimi shadow` against the fake internet."""
     spec = importlib.util.spec_from_file_location("irimi_demo", DEMO_SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -55,11 +58,10 @@ def _base_url_charge(charge_id: str) -> dict[str, object]:
 
 
 def base_url_stripe() -> dict[str, Any]:
-    """The Stripe on the other side of the base-URL refund, for `serve(FakeStripe, threaded=True,
-    **base_url_stripe())`: any charge is a refundable one, and any other read is the charge list.
-    `GET /v1/charges/{id}` is irimi's precondition read before it fakes the refund; the bare
-    collection is the agent's own read. A POST reaching it at all is the failure: under shadow
-    the refund is answered by irimi and this server must never hear about it."""
+    """The base-URL refund's Stripe, for `serve(FakeStripe, threaded=True, **base_url_stripe())`.
+
+    Any charge is refundable (irimi's check read) and any other read is the charge list (the
+    agent's). Under shadow the refund is faked, so no POST may reach it."""
     return {
         "any_charge": lambda handler, charge_id: _base_url_charge(charge_id),
         "not_found": Answer(200, stripe_list(_base_url_charge(CHARGE_ID), has_more=None)),
@@ -67,12 +69,10 @@ def base_url_stripe() -> dict[str, Any]:
 
 
 class StandInReader(reader.UpstreamReader):
-    """`UpstreamReader` pointed at the loopback stand-in.
+    """`UpstreamReader` pointed at the loopback fake Stripe.
 
-    In a real run through the door the precondition read dials `api.stripe.com`, which is correct
-    and is the whole reason the forward-proxy criterion goes through the FORWARD proxy instead.
-    A test may not make a network call, so the one thing the door forces -
-    a real host on the write - is redirected here and nowhere else in the product.
+    In base-URL mode the write names a real host, so irimi's check read dials `api.stripe.com`.
+    A test may make no network call, so this reader sends that read to loopback instead.
     """
 
     port = 0
@@ -83,12 +83,11 @@ class StandInReader(reader.UpstreamReader):
         )
 
 
-# A stub on loopback and `NO_PROXY`: `irimi shadow` and `irimi replay` give their child
-# `NO_PROXY=localhost,127.0.0.1`, so a child that calls a loopback stub by address goes straight to
-# it, irimi sees nothing, and every assertion that the stub heard nothing passes for the wrong
-# reason. So the children here name the proxy explicitly, and the agents in `tests/e2e` either
-# call real names only irimi's process resolves or run with no `NO_PROXY` at all; each proves its
-# routing from the store, where every stub heard exactly what irimi stored as live.
+# The NO_PROXY trap: `irimi shadow` and `irimi replay` give their child
+# `NO_PROXY=localhost,127.0.0.1`, so a child calling a loopback stub by address bypasses irimi and
+# "the stub heard nothing" passes for the wrong reason. The children here name the proxy
+# explicitly; the agents in `tests/e2e` call names only irimi's process resolves, or run with no
+# `NO_PROXY`, and prove their routing from the store.
 
 # Placeholders rather than `str.format`: the source below is full of literal braces.
 BASE_URL_CHILD = '''
@@ -137,13 +136,11 @@ REFUND_CHARGE = "ch_REAL1"
 
 REFUND_AMOUNT = 4900
 
-# The amount as a person reads it: the refund names no currency and irimi's own precondition read
-# of `ch_REAL1` found `usd` on the charge, which the write's exchange carries.
+# The refund names no currency; irimi's check read of `ch_REAL1` finds `usd` on the charge.
 REFUND_MONEY = format_minor_units(REFUND_AMOUNT, "usd")
 
-# The refund agent's summary under its header line, as the criterion and its CLI twin both assert
-# it: the overlaid reads hang under the refund they saw, and the engine's reads are counted but
-# kept out of the agent's `N reads`.
+# The refund agent's summary below its header. The overlaid reads hang under the refund they saw,
+# and irimi's check reads are counted apart from the agent's `N reads`.
 REFUND_SUMMARY = [
     "",
     "  None of these writes reached the real service:",
@@ -162,8 +159,8 @@ REFUND_SUMMARY = [
     "  7 exchanges · 5 real · 2 answered by irimi (2 faked writes) · 0 sent to targets",
 ]
 
-# Placeholders rather than `str.format`, as in CHILD. The same five calls as the criterion above,
-# spelled as a child process sends them through `HTTP_PROXY`: an absolute URL to the proxy.
+# The refund agent's five calls, sent through `HTTP_PROXY` as absolute URLs. Placeholders rather
+# than `str.format`, as in BASE_URL_CHILD.
 REFUND_CHILD = """
 import http.client, os, urllib.parse, uuid
 
@@ -196,10 +193,10 @@ call("POST", "/v1/refunds", refund)
 def run_refund_scenario(
     tmp_path, monkeypatch, *flags: str, stripe_map: str = PRECONDITION_STRIPE_MAP, calls: str = ""
 ) -> None:
-    """The refund agent's five calls from a child of the real `irimi shadow`, against the loopback
-    Stripe, which never hears a write. `flags` go before the `--`, and `calls` are more of the
-    child's own `call(...)` lines after the five. Shared with `tests/e2e/test_trace_roundtrip.py`
-    and `tests/cli/test_runs.py`, which read back what the run stored."""
+    """Run the refund agent's five calls under the real `irimi shadow`; Stripe hears no write.
+
+    `flags` go before the `--`, and `calls` are more `call(...)` lines for the child after the five.
+    """
     stripe = serve(FakeStripe, threaded=True, **precondition_stripe())
     maps_dir = tmp_path / "shipped"
     maps_dir.mkdir()

@@ -1,5 +1,4 @@
-"""Asking a policy for its decision, the way the session asks, and flattening the answer
-into the fields tests assert on."""
+"""Ask a policy for its decision as the session does, flattened into the fields tests check."""
 
 import json
 from dataclasses import dataclass, replace
@@ -38,8 +37,7 @@ def make_request(
 
 @dataclass(frozen=True)
 class Flat:
-    """A policy's `Decided`, flattened into the fields these tests assert on: who answers and
-    with what, and what irimi decided about the write."""
+    """A policy's `Decided`, flattened: who answers and with what, and the write's precondition."""
 
     answered_by: str
     response: Response | None
@@ -79,8 +77,7 @@ def flat(decided: Decided) -> Flat:
 
 
 def answer(policy, request, classification, write_log=(), run_id=""):
-    """`policy`'s decision, flattened, with the answer target resolved first, as the session
-    resolves it."""
+    """`policy`'s decision, flattened, with the target resolved first as the session does."""
     target = targets.delegate(request, classification)
     return flat(policy.decide(request, classification, write_log, run_id, target))
 
@@ -106,8 +103,7 @@ def answer_with(index, request):
 class CannedReader(reader.Reader):
     """A reader serving canned answers in order, and writing down every request it was asked.
 
-    An answer that is an exception is raised instead of returned, so "the reader raised" is one
-    more canned answer rather than a second helper.
+    An answer that is an exception is raised instead of returned.
     """
 
     def __init__(self, answers):
@@ -177,5 +173,5 @@ def slack_post_request(channel: str) -> Request:
 
 
 def ask(policy: ShadowPolicy, request: Request):
-    """`_checked`, but against a policy the test holds, so two calls share one run's store."""
+    """`checked`, but against a policy the test holds, so two calls share one run's store."""
     return answer(policy, request, classify(request, SHIPPED), (), "t3st")

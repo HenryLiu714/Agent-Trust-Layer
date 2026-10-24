@@ -1,5 +1,7 @@
-"""The quickstart agent against Stripe test mode, which proves that no refund reached the real
-ledger. Deselected by default; run it with `uv run pytest -m live`."""
+"""The quickstart agent against Stripe test mode: no refund reaches the real ledger.
+
+Deselected by default; run it with `uv run pytest -m live`.
+"""
 
 import os
 import re
@@ -34,10 +36,9 @@ def _said(pattern: re.Pattern[str], out: str) -> re.Match[str]:
     reason="live check: set STRIPE_API_KEY to a sk_test_ key and seed a charge",
 )
 def test_the_quickstart_agent_leaves_no_refund_on_a_real_test_mode_charge(home, capfd, monkeypatch):
-    """The quickstart agent itself, through the forward proxy, against Stripe test mode: it
-    refunds a charge in full, finds its refund in the list, re-reads the charge refunded, retries
-    and is refused - every answer irimi's - and a live re-read of the charge afterwards shows none
-    of it happened.
+    """The quickstart agent's refund, re-read and refused retry leave the test-mode charge as is.
+
+    Every answer the agent sees is irimi's; a live re-read afterwards shows none of it happened.
 
         uv sync --group examples && uv run python -m examples.seed_stripe
         STRIPE_API_KEY=sk_test_... uv run pytest -m live -q -rs tests/live

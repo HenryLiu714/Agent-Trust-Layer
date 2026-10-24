@@ -1,5 +1,7 @@
-"""The scope rule: no classification that forwards live applies to an unsafe method it did not
-name, held when a map loads and again at the decision."""
+"""The scope rule: no live-forwarding classification applies to an unsafe method it did not name.
+
+It is held when a map loads and again at the decision.
+"""
 
 from dataclasses import replace
 
@@ -24,8 +26,7 @@ def test_unsafe_method_read_needs_live_because(tmp_path):
     as_delete = base.replace(
         "      method: POST\n      path: /v1/search", "      method: DELETE\n      path: /v1/search"
     )
-    # DELETE is caught one rule earlier now, by the live-kind rule that covers every live kind
-    # rather than `read` alone - a stricter refusal of the same configuration.
+    # DELETE is caught one rule earlier, by the rule that covers every live kind, not `read` alone.
     assert_refused(tmp_path, as_delete, "would be performed for real")
 
 
@@ -62,8 +63,7 @@ def test_default_kind_is_accepted_for_the_kinds_that_are_answered_locally(tmp_pa
 
 
 def test_default_kinds_is_derived_from_the_live_set(tmp_path):
-    """The rule is `not forwarded live`, not a hand-kept list: a live kind added to LIVE_KINDS
-    later must be refused as a default the day it is added, with no second edit here."""
+    """The allowed default kinds are the kinds not forwarded live, so a new live kind is refused."""
     assert set(servicemaps.model.DEFAULT_KINDS) == set(KINDS) - set(LIVE_KINDS)
     assert set(servicemaps.model.DEFAULT_KINDS).isdisjoint(LIVE_KINDS)
 
@@ -87,9 +87,10 @@ def test_default_kind_may_not_be_llm(tmp_path):
 
 
 def test_default_kind_may_not_be_telemetry(tmp_path):
-    """`telemetry` is forwarded live, and most of these vendors serve their REST control plane
-    from the same host as their intake, so a telemetry default would perform
-    `DELETE /api/v1/dashboard/{id}` for real. The loader refuses it."""
+    """`telemetry` is refused as a default, since it forwards live.
+
+    A vendor's intake host often serves its REST control plane too, so a dashboard DELETE would
+    run for real."""
     assert_refused(
         tmp_path,
         GOOD_MAP.replace("style: rest", "default_kind: telemetry"),
@@ -99,8 +100,7 @@ def test_default_kind_may_not_be_telemetry(tmp_path):
 
 @pytest.mark.parametrize("kind", LIVE_KINDS)
 def test_every_live_kind_is_refused_as_a_default_with_its_own_reason(tmp_path, kind):
-    """Each refusal explains itself: a generic message would not tell a map author what to write
-    instead. The loop is over LIVE_KINDS so a new live kind fails here until it has a reason."""
+    """Each live kind refused as a default gives its own reason, so the author knows what to do."""
     reason = servicemaps.loader.DEFAULT_KIND_REASONS[kind]
     assert_refused(tmp_path, GOOD_MAP.replace("style: rest", f"default_kind: {kind}"), reason)
 
@@ -112,8 +112,7 @@ def test_default_kind_must_be_a_kind(tmp_path):
 
 
 def test_an_override_cannot_set_default_kind(tmp_path):
-    """`default_kind` decides what happens to every route the map does not list, so letting a
-    user's overrides file set it would be a way to reclassify writes."""
+    """An overrides file may not set `default_kind`, which would reclassify every unlisted write."""
     assert_refused(
         tmp_path,
         GOOD_MAP,
@@ -123,11 +122,10 @@ def test_an_override_cannot_set_default_kind(tmp_path):
 
 
 def test_a_loopback_webhook_route_does_not_license_an_off_machine_service_target():
-    """THE SCOPE RULE, host scope. The rule is keyed on the host, not on (service, operation):
-    keyed on the route, a loopback target on the *listed* webhook route would satisfy it while a
-    service target sent every *unlisted* path off the machine. `/workflows/...` and
-    `/triggers/...` are real Slack webhook forms whose path is the credential just as
-    `/services/...` is."""
+    """The scope rule's host scope: a credential-path host's targets must all be loopback.
+
+    Keyed on the route, a loopback target on the listed webhook route would let a service target
+    send every unlisted path (`/workflows/...`, `/triggers/...`) off the machine."""
     with pytest.raises(MapError) as exc:
         servicemaps.load(
             cwd=None,
@@ -136,14 +134,14 @@ def test_a_loopback_webhook_route_does_not_license_an_off_machine_service_target
             targets=[
                 # The route-level rule is satisfied: this one really is loopback.
                 ("hooks.slack.com", "/services/{team}/{bot}/{token}", "http://127.0.0.1:3000"),
-                # ... and this would delegate every path the map does not list.
+                # ... and this would send every path the map does not list to a target.
                 ("slack.com", "", "http://stub.internal:9000"),
             ],
         )
     assert "a target on this host may only be loopback" in str(exc.value)
 
 
-# --------------------------------------------------- THE SCOPE RULE: live kinds and methods
+# --------------------------------------------------- the scope rule: live kinds and methods
 
 _ANY_METHOD_TELEMETRY = """
 version: 1
@@ -160,11 +158,9 @@ routes:
 
 
 def test_a_live_kind_may_not_match_every_method(tmp_path):
-    """THE SCOPE RULE, method scope. `kind` is written per route, but "forward this to the real
-    service" is a decision about a verb: a `match:` with no `method:` means `*`, and `*` includes
-    DELETE. This is the live `default_kind` hazard one scope down, and reachable by omission
-    rather than by writing `"*"` on purpose - every shipped route happens to carry a `method:`,
-    which is the only reason nothing shipped broken."""
+    """The scope rule's method scope: a live route must name its method.
+
+    A `match:` with no `method:` means `*`, which includes DELETE."""
     assert_refused(tmp_path, _ANY_METHOD_TELEMETRY, "may not match every method")
     # Naming the method it actually serves is all it takes.
     named = _ANY_METHOD_TELEMETRY.replace("      path:", "      method: POST\n      path:")
@@ -174,9 +170,9 @@ def test_a_live_kind_may_not_match_every_method(tmp_path):
 @pytest.mark.parametrize("method", sorted(servicemaps.model.DESTRUCTIVE_METHODS))
 @pytest.mark.parametrize("kind", ["read", "llm", "telemetry"])
 def test_a_live_kind_on_a_destructive_method_must_justify_itself(tmp_path, method, kind):
-    """Naming the verb is necessary but not sufficient: `DELETE api.datadoghq.com/api/v1/
-    dashboard/{id}` classified `telemetry` is performed for real. The author has to say why it
-    persists nothing, which is the same bar `kind: read` already had to clear."""
+    """A live kind on a destructive method needs a `live_because:`, as `kind: read` on one does.
+
+    A `DELETE` of a dashboard classified `telemetry` is performed for real."""
     doc = _ANY_METHOD_TELEMETRY.replace(
         "      path:", f"      method: {method}\n      path:"
     ).replace("kind: telemetry", f"kind: {kind}")
@@ -189,20 +185,17 @@ def test_a_live_kind_on_a_destructive_method_must_justify_itself(tmp_path, metho
 
 
 def test_post_is_still_the_honest_verb_for_inference_and_intake(tmp_path):
-    """The rule names the destructive verbs, not every RFC-unsafe one. POST is what an LLM
-    completion and a telemetry batch are, so requiring a justification for it would mean every
-    shipped `llm` and `telemetry` route carrying one."""
+    """A live kind on POST needs no justification: the rule names the destructive verbs only.
+
+    POST is what an LLM completion and a telemetry batch are."""
     doc = _ANY_METHOD_TELEMETRY.replace("      path:", "      method: POST\n      path:")
     assert load_docs(tmp_path, doc).service_for("probe.example") is not None
 
 
 def test_a_live_kind_is_downgraded_when_the_route_did_not_name_the_method():
-    """THE SCOPE RULE, decision half. The loader refuses this configuration, so nothing can reach
-    the classifier this way today - which is the point. The rule is asked of the request in front
-    of us, so a live kind arriving by a route the loader does not police is answered locally
-    instead of performed on the real service.
+    """The scope rule's decision half: an unnamed method on a live route is answered by irimi.
 
-    The map is built here rather than loaded, because the loader refuses to produce one.
+    The loader refuses this map, so it is built here; the classifier still holds the rule itself.
     """
     from irimi.servicemaps import MapIndex, Route, ServiceMap
 
@@ -229,8 +222,7 @@ def test_a_live_kind_is_downgraded_when_the_route_did_not_name_the_method():
         )
         assert cls.kind == "unknown", f"{method} was classified live"
         assert Flag.DOWNGRADED in cls.flags
-    # POST is left alone: it is what a telemetry batch is, and the route still does not name it,
-    # so it is downgraded too. Naming the verb is what makes it explicit.
+    # Naming the verb is what makes it explicit.
     named = replace(route, method="DELETE")
     index = MapIndex((replace(sm, routes=(named,)),))
     cls = classify(

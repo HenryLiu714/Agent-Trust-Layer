@@ -1,7 +1,6 @@
 """Values the tests build over and over, each with defaults a test overrides by keyword.
 
-A test that needs a different default says so in its own one-line wrapper, so the difference is
-visible where it matters.
+A test that needs other defaults wraps a builder in a one-line helper of its own.
 """
 
 import dataclasses
@@ -109,13 +108,9 @@ def first_answer(body: bytes = b'{"id": "re_MINTED1"}') -> FirstAnswer:
     )
 
 
-# `filled(cls)`: a value in every field, built from the dataclass's own field types, so a field
-# added later is filled - or, when its type is new here, refused - without anyone remembering to
-# touch this file. Every value differs from the field's default: a field a codec forgot then
-# decodes as its default, and a round trip fails. And every value differs from every other
-# field's, of any type, in the same record and the records nested in it: a codec that writes one
-# field's value under another's key (`"ended_at": ex.started_at`) then decodes to a different
-# record, and fails the round trip too.
+# `filled(cls)` sets every field from the dataclass's own types, to a value unlike its default and
+# unlike every other field's: a codec that drops a field, or writes one field under another's key,
+# then fails its round trip. A field of a type `sample` does not know is refused.
 
 
 def sample(tp, name, n, default=dataclasses.MISSING):
@@ -147,7 +142,7 @@ def sample(tp, name, n, default=dataclasses.MISSING):
         return sample(arm, name, n, default)
     if origin is tuple and len(args) == 2 and args[1] is Ellipsis:
         # Three distinct items, neither ascending nor descending: a codec that sorts, reverses or
-        # dedups the sequence fails. For `stream_chunks: tuple[int, ...]` as much as `flags`.
+        # dedups the sequence fails.
         first, second, third = (sample(args[0], f"{name}{i}", n) for i in range(3))
         return (second, first, third)
     if origin is tuple:
@@ -173,8 +168,9 @@ def filled(cls, n=None):
 
 
 def demo_exchange(answered_by, kind="write", headers=()):
-    """The demo map's `things.create`, answered by `answered_by` with `headers`, in the engine's
-    run: what the invariant checkers are fed to show they catch a forged answer."""
+    """The demo map's `things.create`, answered by `answered_by` with `headers`, in run `t3st`.
+
+    The invariant checkers are fed these to show they catch a forged answer."""
     return exchange(
         request=request(method="POST", host="127.0.0.1", path="/things"),
         response=response(headers=headers, body=b"{}"),
@@ -187,7 +183,7 @@ def demo_exchange(answered_by, kind="write", headers=()):
 
 
 def refund_exchange(amount: int = 4900, **overrides) -> Exchange:
-    """A refund of `ch_1` that irimi faked at L1 once its precondition check passed."""
+    """A refund of `ch_1` that irimi faked with a fixture once its precondition check passed."""
     body = f"charge=ch_1&amount={amount}&currency=usd".encode()
     fields = {
         "request": request(method="POST", path="/v1/refunds", headers=(FORM_HEADER,), body=body),
